@@ -1,0 +1,68 @@
+name: "Boop"
+description: "Install boop CLI, apply pending changes, and output version and changelog"
+
+inputs:
+  boop-cli-version:
+    description: 'Version of boop CLI to install (e.g., "1.0.0"). Defaults to latest.'
+    required: false
+    default: "latest"
+
+outputs:
+  released:
+    description: "Whether boop apply found and applied pending changes"
+    value: ${{ steps.apply.outputs.released }}
+  version:
+    description: "The current version from boop version"
+    value: ${{ steps.meta.outputs.version }}
+  changelog:
+    description: "The changelog from boop changelog"
+    value: ${{ steps.meta.outputs.changelog }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install boop CLI (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        VERSION="${{ inputs.boop-cli-version }}"
+        if [ "$VERSION" != "latest" ]; then
+          export BOOP_VERSION="$VERSION"
+        fi
+        export BOOP_INSTALL_DIR="${{ runner.temp }}/boop/bin"
+        "${{ github.action_path }}/scripts/install.sh"
+        echo "${{ runner.temp }}/boop/bin" >> "$GITHUB_PATH"
+
+    - name: Install boop CLI (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $version = "${{ inputs.boop-cli-version }}"
+        if ($version -ne "latest") {
+          $env:BOOP_VERSION = $version
+        }
+        $env:BOOP_INSTALL_DIR = "${{ runner.temp }}\boop\bin"
+        & "${{ github.action_path }}\scripts\install.ps1"
+        echo "${{ runner.temp }}\boop\bin" >> $env:GITHUB_PATH
+
+    - name: Apply pending changes
+      id: apply
+      shell: bash
+      run: |
+        if boop apply; then
+          echo "released=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "released=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Get version and changelog
+      if: steps.apply.outputs.released == 'true'
+      id: meta
+      shell: bash
+      run: |
+        echo "version=$(boop version)" >> "$GITHUB_OUTPUT"
+
+        EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+        echo "changelog<<$EOF" >> "$GITHUB_OUTPUT"
+        boop changelog >> "$GITHUB_OUTPUT"
+        echo "$EOF" >> "$GITHUB_OUTPUT"

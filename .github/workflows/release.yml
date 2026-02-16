@@ -15,61 +15,48 @@ jobs:
     name: Check for release
     runs-on: ubuntu-latest
     outputs:
-      released: ${{ steps.apply.outputs.released }}
-      version: ${{ steps.meta.outputs.version }}
-      changelog: ${{ steps.meta.outputs.changelog }}
+      released: ${{ steps.boop.outputs.released }}
+      version: ${{ steps.boop.outputs.version }}
+      changelog: ${{ steps.boop.outputs.changelog }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Run boop
+        id: boop
+        uses: ./
+
       - name: Install Rust toolchain
+        if: steps.boop.outputs.released == 'true'
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build boop
-        run: cargo build --release
-
-      - name: Apply pending changes
-        id: apply
-        run: |
-          if ./target/release/boop apply; then
-            echo "released=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No pending changes, skipping release."
-            echo "released=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Get version and changelog
-        if: steps.apply.outputs.released == 'true'
-        id: meta
-        run: |
-          VERSION=$(./target/release/boop version)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          echo "changelog<<$EOF" >> "$GITHUB_OUTPUT"
-          ./target/release/boop changelog >> "$GITHUB_OUTPUT"
-          echo "$EOF" >> "$GITHUB_OUTPUT"
-
       - name: Update crate version
-        if: steps.apply.outputs.released == 'true'
+        if: steps.boop.outputs.released == 'true'
         run: |
-          sed -i 's/^version = ".*"/version = "${{ steps.meta.outputs.version }}"/' Cargo.toml
+          sed -i 's/^version = ".*"/version = "${{ steps.boop.outputs.version }}"/' Cargo.toml
           cargo update --workspace
 
       - name: Commit and push
-        if: steps.apply.outputs.released == 'true'
+        if: steps.boop.outputs.released == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .boop/releases.toml Cargo.toml Cargo.lock
           git commit -m "$(cat <<'MSG'
-          ci(boop): release ${{ steps.meta.outputs.version }} [skip ci]
+          ci(boop): release ${{ steps.boop.outputs.version }} [skip ci]
 
-          ${{ steps.meta.outputs.changelog }}
+          ${{ steps.boop.outputs.changelog }}
           MSG
           )"
-          git tag "v${{ steps.meta.outputs.version }}"
+          git tag "v${{ steps.boop.outputs.version }}"
           git push origin main --tags
+
+      - name: Update major version tag
+        if: steps.boop.outputs.released == 'true'
+        run: |
+          MAJOR=$(echo "${{ steps.boop.outputs.version }}" | cut -d. -f1)
+          git tag -fa "v$MAJOR" -m "Update v$MAJOR to ${{ steps.boop.outputs.version }}"
+          git push origin "v$MAJOR" --force
 
   build:
     name: Build ${{ matrix.target }}
