@@ -56,25 +56,35 @@ boop apply --pre beta           # 2.1.0-beta.1
 boop apply                      # 2.1.0
 ```
 
-## CI automation
+## GitHub Action
 
-boop is designed to run in CI. A typical GitHub Actions workflow:
+The easiest way to use boop in CI is the official GitHub Action:
 
 ```yaml
-- name: Apply pending changes
-  id: apply
-  run: |
-    if boop apply; then
-      echo "released=true" >> "$GITHUB_OUTPUT"
-    fi
+- uses: danielkov/boop@v1
+  id: boop
 
-- name: Release
-  if: steps.apply.outputs.released == 'true'
+- if: steps.boop.outputs.released == 'true'
   run: |
-    VERSION=$(boop version)
-    # update your manifest, commit, tag, create GH release
-    gh release create "v${VERSION}" --notes "$(boop changelog)"
+    echo "Released ${{ steps.boop.outputs.version }}"
+    echo "${{ steps.boop.outputs.changelog }}"
 ```
+
+### Inputs
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `boop-cli-version` | `latest` | Version of boop CLI to install (e.g., `1.0.0`) |
+
+### Outputs
+
+| Name | Description |
+|------|-------------|
+| `released` | `true` if pending changes were applied, `false` otherwise |
+| `version` | The newly applied version (e.g., `2.1.0`) |
+| `changelog` | The assembled changelog markdown for the release |
+
+The action installs the boop CLI, runs `boop apply`, and exposes the results as step outputs. Works on Linux, macOS, and Windows runners.
 
 See [boop's own release workflow](.github/workflows/release.yml) for a complete example with cross-platform binary builds.
 
