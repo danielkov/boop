@@ -1,6 +1,10 @@
 name: "Boop Release"
 description: "Install boop CLI, apply pending changes, and output version and changelog"
 
+branding:
+  icon: "package"
+  color: "purple"
+
 inputs:
   boop-cli-version:
     description: 'Version of boop CLI to install (e.g., "1.0.0"). Defaults to latest.'
