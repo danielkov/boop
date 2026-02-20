@@ -8,8 +8,57 @@ use crate::version::{BumpKind, parse_kind};
 
 pub fn assemble_changelog(
     base: &Path,
-    version: &str,
+    workspace: &str,
     entry_filenames: &[String],
+) -> Result<String, StoreError> {
+    assemble_changelog_scoped(base, workspace, entry_filenames, false)
+}
+
+pub fn assemble_changelog_for_workspace(
+    base: &Path,
+    manifest: &store::Manifest,
+    workspace_key: &str,
+    entry_filenames: &[String],
+) -> Result<String, StoreError> {
+    let mut major_entries: Vec<(&str, String)> = Vec::new();
+    let mut minor_entries: Vec<(&str, String)> = Vec::new();
+    let mut patch_entries: Vec<(&str, String)> = Vec::new();
+
+    for filename in entry_filenames {
+        let content = store::read_entry_for_workspace(base, manifest, workspace_key, filename)?;
+        match parse_kind(filename) {
+            Some(BumpKind::Major) => major_entries.push((filename, content)),
+            Some(BumpKind::Minor) => minor_entries.push((filename, content)),
+            Some(BumpKind::Patch) => patch_entries.push((filename, content)),
+            None => {}
+        }
+    }
+
+    major_entries.sort_by_key(|(f, _)| *f);
+    minor_entries.sort_by_key(|(f, _)| *f);
+    patch_entries.sort_by_key(|(f, _)| *f);
+
+    let all_entries: Vec<&str> = major_entries
+        .iter()
+        .chain(minor_entries.iter())
+        .chain(patch_entries.iter())
+        .map(|(_, content)| content.as_str())
+        .collect();
+
+    let output = all_entries
+        .iter()
+        .map(|e| e.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    Ok(output)
+}
+
+pub fn assemble_changelog_scoped(
+    base: &Path,
+    workspace: &str,
+    entry_filenames: &[String],
+    multi: bool,
 ) -> Result<String, StoreError> {
     // Group entries by kind, collecting (filename, content) pairs
     let mut major_entries: Vec<(&str, String)> = Vec::new();
@@ -17,7 +66,7 @@ pub fn assemble_changelog(
     let mut patch_entries: Vec<(&str, String)> = Vec::new();
 
     for filename in entry_filenames {
-        let content = store::read_entry(base, filename)?;
+        let content = store::read_entry_scoped(base, workspace, filename, multi)?;
         match parse_kind(filename) {
             Some(BumpKind::Major) => major_entries.push((filename, content)),
             Some(BumpKind::Minor) => minor_entries.push((filename, content)),
@@ -41,13 +90,11 @@ pub fn assemble_changelog(
         .map(|(_, content)| content.as_str())
         .collect();
 
-    let mut output = format!("# {version}\n");
-
-    for entry_content in &all_entries {
-        output.push('\n');
-        output.push_str(entry_content.trim_end());
-        output.push('\n');
-    }
+    let output = all_entries
+        .iter()
+        .map(|e| e.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n\n");
 
     Ok(output)
 }
@@ -88,19 +135,16 @@ mod tests {
             "patch-01HQ2YDEF.md".to_string(),
         ];
 
-        let result = assemble_changelog(dir.path(), "1.3.0", &filenames).unwrap();
+        let result = assemble_changelog(dir.path(), "root", &filenames).unwrap();
 
         let expected = "\
-# 1.3.0
-
 ## Added CSV export
 
 Users can now export reports as CSV.
 
 ## Fixed login bug
 
-The login form no longer crashes on empty input.
-";
+The login form no longer crashes on empty input.";
         assert_eq!(result, expected);
     }
 
@@ -117,7 +161,7 @@ The login form no longer crashes on empty input.
             "minor-01HQ3.md".to_string(),
         ];
 
-        let result = assemble_changelog(dir.path(), "2.0.0", &filenames).unwrap();
+        let result = assemble_changelog(dir.path(), "root", &filenames).unwrap();
 
         // Major should come first, then minor, then patch
         let major_pos = result.find("## Breaking change").unwrap();
@@ -138,7 +182,7 @@ The login form no longer crashes on empty input.
             "minor-01HQ1AAA.md".to_string(),
         ];
 
-        let result = assemble_changelog(dir.path(), "1.1.0", &filenames).unwrap();
+        let result = assemble_changelog(dir.path(), "root", &filenames).unwrap();
 
         let earlier_pos = result.find("## Earlier feature").unwrap();
         let later_pos = result.find("## Later feature").unwrap();
@@ -150,8 +194,8 @@ The login form no longer crashes on empty input.
         let _dir = setup_test_dir();
         let filenames: Vec<String> = vec![];
 
-        let result = assemble_changelog(_dir.path(), "1.0.0", &filenames).unwrap();
-        assert_eq!(result, "# 1.0.0\n");
+        let result = assemble_changelog(_dir.path(), "root", &filenames).unwrap();
+        assert_eq!(result, "");
     }
 
     #[test]
@@ -162,7 +206,7 @@ The login form no longer crashes on empty input.
 
         let filenames = vec!["minor-01HQ1.md".to_string(), "unknown-01HQ2.md".to_string()];
 
-        let result = assemble_changelog(dir.path(), "1.1.0", &filenames).unwrap();
+        let result = assemble_changelog(dir.path(), "root", &filenames).unwrap();
 
         assert!(result.contains("## Feature"));
         assert!(!result.contains("## Mystery"));

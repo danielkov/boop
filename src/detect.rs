@@ -47,7 +47,7 @@ fn detect_cargo_toml(base: &Path) -> Result<Option<String>, DetectError> {
     let Some(content) = read_if_exists(&path)? else {
         return Ok(None);
     };
-    let parsed: toml::Value = match content.parse() {
+    let parsed: toml::Table = match content.parse() {
         Ok(v) => v,
         Err(_) => return Ok(None),
     };
@@ -78,7 +78,7 @@ fn detect_pyproject_toml(base: &Path) -> Result<Option<String>, DetectError> {
     let Some(content) = read_if_exists(&path)? else {
         return Ok(None);
     };
-    let parsed: toml::Value = match content.parse() {
+    let parsed: toml::Table = match content.parse() {
         Ok(v) => v,
         Err(_) => return Ok(None),
     };
@@ -437,7 +437,7 @@ mod tests {
         // Test with the project's own Cargo.toml
         let project_root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let result = detect_version(project_root).unwrap();
-        assert_eq!(result, Some("0.1.0".to_string()));
+        assert_eq!(result, Some("1.1.0".to_string()));
     }
 
     #[test]
