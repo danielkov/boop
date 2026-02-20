@@ -14,10 +14,10 @@ pub fn run(base: &Path, workspace: Option<&str>) -> Result<(), BoopError> {
     let workspace_names: Vec<String> = match workspace {
         Some(name) => {
             store::validate_workspace_name(name)?;
-            if manifest.groups.contains_key(name) {
-                store::leaf_workspaces_under(&manifest, name)
-            } else if manifest.workspaces.contains_key(name) {
+            if manifest.workspaces.contains_key(name) {
                 vec![name.to_string()]
+            } else if manifest.groups.contains_key(name) {
+                store::leaf_workspaces_under(&manifest, name)
             } else {
                 return Err(StatusError::UnknownWorkspace {
                     name: name.to_string(),

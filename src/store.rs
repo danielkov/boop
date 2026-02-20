@@ -90,7 +90,9 @@ pub fn resolve_workspace_targets(
             Ok(resolved)
         } else {
             for name in &names {
-                if manifest.groups.contains_key(name) {
+                if manifest.groups.contains_key(name)
+                    && !manifest.workspaces.contains_key(name)
+                {
                     return Err(StoreError::WorkspaceIsGroup { name: name.clone() });
                 }
                 if !manifest.workspaces.contains_key(name) {
@@ -103,7 +105,7 @@ pub fn resolve_workspace_targets(
         Ok(manifest.workspaces.keys().cloned().collect())
     } else {
         let default = &manifest.default_workspace;
-        if manifest.groups.contains_key(default) {
+        if manifest.groups.contains_key(default) && !manifest.workspaces.contains_key(default) {
             return Err(StoreError::WorkspaceIsGroup {
                 name: default.clone(),
             });
@@ -459,12 +461,6 @@ pub fn read_manifest(base: &Path) -> Result<Manifest, StoreError> {
                 source,
             })?;
 
-        if root.workspaces.is_empty() {
-            return Err(StoreError::CorruptManifest {
-                reason: "workspaces list is empty".to_string(),
-            });
-        }
-
         let mut workspaces = BTreeMap::new();
         let mut groups = BTreeMap::new();
 
@@ -506,22 +502,22 @@ pub fn read_manifest(base: &Path) -> Result<Manifest, StoreError> {
         groups.insert(".".to_string(), root.workspaces.clone());
 
         let default_workspace = if let Some(default_ws) = root.default_workspace {
-            validate_workspace_name(&default_ws)?;
-            if !workspaces.contains_key(&default_ws) && !groups.contains_key(&default_ws) {
-                return Err(StoreError::CorruptManifest {
-                    reason: format!("default_workspace {default_ws:?} is not in workspaces list"),
-                });
+            if !default_ws.is_empty() {
+                validate_workspace_name(&default_ws)?;
+                if !workspaces.contains_key(&default_ws) && !groups.contains_key(&default_ws) {
+                    return Err(StoreError::CorruptManifest {
+                        reason: format!(
+                            "default_workspace {default_ws:?} is not in workspaces list"
+                        ),
+                    });
+                }
             }
             default_ws
         } else if workspaces.contains_key(".") {
             ".".to_string()
         } else {
-            // Pick first leaf workspace
-            workspaces
-                .keys()
-                .next()
-                .cloned()
-                .unwrap_or_else(|| root.workspaces[0].clone())
+            // Pick first leaf workspace, or empty if none
+            workspaces.keys().next().cloned().unwrap_or_default()
         };
 
         return Ok(Manifest {
@@ -672,10 +668,11 @@ fn looks_like_workspace_mode_manifest(manifest: &Manifest) -> bool {
 }
 
 fn write_workspace_mode_manifest(base: &Path, manifest: &Manifest) -> Result<(), StoreError> {
-    // Validate default_workspace exists as leaf or group
-    if !manifest
-        .workspaces
-        .contains_key(&manifest.default_workspace)
+    // Validate default_workspace exists as leaf or group (empty is OK for pure roots)
+    if !manifest.default_workspace.is_empty()
+        && !manifest
+            .workspaces
+            .contains_key(&manifest.default_workspace)
         && !manifest.groups.contains_key(&manifest.default_workspace)
     {
         return Err(StoreError::CorruptManifest {
@@ -702,7 +699,11 @@ fn write_workspace_mode_manifest(base: &Path, manifest: &Manifest) -> Result<(),
 
     let mut root = WorkspaceRootManifest {
         workspaces: root_children,
-        default_workspace: Some(manifest.default_workspace.clone()),
+        default_workspace: if manifest.default_workspace.is_empty() {
+            None
+        } else {
+            Some(manifest.default_workspace.clone())
+        },
         name: None,
         version: None,
         releases: BTreeMap::new(),

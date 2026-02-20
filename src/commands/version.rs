@@ -11,7 +11,7 @@ pub fn run(base: &Path, workspace: Option<&str>) -> Result<(), VersionError> {
     if let Some(name) = workspace {
         store::validate_workspace_name(name)?;
     }
-    if manifest.groups.contains_key(ws_name) {
+    if manifest.groups.contains_key(ws_name) && !manifest.workspaces.contains_key(ws_name) {
         return Err(VersionError::Store(
             crate::errors::StoreError::WorkspaceIsGroup {
                 name: ws_name.to_string(),

@@ -12,12 +12,13 @@ pub fn run(
     workspace: Option<&str>,
     name: Option<&str>,
 ) -> Result<(), InitError> {
-    // --name without -w is invalid
-    if name.is_some() && workspace.is_none() {
+    // --name without -w <path> is invalid
+    if name.is_some() && !matches!(workspace, Some(p) if !p.is_empty()) {
         return Err(InitError::NameWithoutWorkspace);
     }
 
     match workspace {
+        Some("") => run_workspace_root_init(base, version),
         Some(ws_path) => run_workspace_init(base, version, ws_path, name),
         None => run_root_init(base, version),
     }
@@ -59,6 +60,38 @@ fn run_root_init(base: &Path, version: Option<&str>) -> Result<(), InitError> {
         default_workspace: "root".to_string(),
         workspaces,
         groups: BTreeMap::new(),
+        release_groups: Vec::new(),
+    };
+    store::write_manifest(base, &manifest)?;
+
+    Ok(())
+}
+
+fn run_workspace_root_init(base: &Path, version: Option<&str>) -> Result<(), InitError> {
+    if store::is_initialized(base) {
+        return Err(InitError::AlreadyInitialized {
+            path: store::boop_dir(base),
+        });
+    }
+
+    if version.is_some() {
+        // No leaf workspace at root, so --version doesn't apply
+        return Err(InitError::Store(StoreError::CorruptManifest {
+            reason: "--version has no effect with bare -w (no root workspace to version)"
+                .to_string(),
+        }));
+    }
+
+    store::create_boop_dir(base)?;
+
+    let manifest = Manifest {
+        default_workspace: String::new(),
+        workspaces: BTreeMap::new(),
+        groups: {
+            let mut g = BTreeMap::new();
+            g.insert(".".to_string(), Vec::new());
+            g
+        },
         release_groups: Vec::new(),
     };
     store::write_manifest(base, &manifest)?;
@@ -188,6 +221,11 @@ fn run_workspace_init(
             releases,
         },
     );
+
+    // Set default_workspace if not yet set (first workspace in a pure root)
+    if manifest.default_workspace.is_empty() {
+        manifest.default_workspace = ws_key.clone();
+    }
 
     // 9. Write manifest and create changelogs dir
     store::write_manifest(base, &manifest)?;

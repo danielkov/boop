@@ -14,8 +14,8 @@ enum Commands {
         /// Initial version (overrides auto-detection)
         #[arg(long)]
         version: Option<String>,
-        /// Add a workspace at the given path to an initialized repo
-        #[arg(short = 'w', long = "workspace")]
+        /// Add a workspace at the given path, or use bare -w to create a workspace root
+        #[arg(short = 'w', long = "workspace", num_args = 0..=1, default_missing_value = "")]
         workspace: Option<String>,
         /// Set a custom workspace name (key segment) that differs from the directory name
         #[arg(long)]
