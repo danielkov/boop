@@ -20,6 +20,9 @@ enum Commands {
         /// Set a custom workspace name (key segment) that differs from the directory name
         #[arg(long)]
         name: Option<String>,
+        /// Set the new workspace as the default for commands that don't specify -w
+        #[arg(long)]
+        default: bool,
     },
 
     /// Create a major change entry
@@ -119,12 +122,14 @@ fn run(command: Commands) -> Result<(), boop::errors::BoopError> {
             version,
             workspace,
             name,
+            default,
         } => {
             boop::commands::init::run(
                 &base,
                 version.as_deref(),
                 workspace.as_deref(),
                 name.as_deref(),
+                default,
             )?;
         }
         Commands::Major {

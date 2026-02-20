@@ -63,7 +63,15 @@ pub fn run(
     // Determine target workspace names
     let ws_names: Vec<String> = match workspaces {
         Some(csv) => store::parse_workspace_csv(csv).map_err(ChangelogError::Store)?,
-        None => vec![manifest.default_workspace.clone()],
+        None => {
+            let dw = manifest
+                .default_workspace
+                .as_ref()
+                .ok_or(ChangelogError::Store(
+                    crate::errors::StoreError::NoDefaultWorkspace,
+                ))?;
+            vec![dw.clone()]
+        }
     };
 
     // Validate all workspace names
@@ -225,7 +233,7 @@ mod tests {
         );
 
         let manifest = Manifest {
-            default_workspace: "root".to_string(),
+            default_workspace: Some("root".to_string()),
             workspaces,
             groups: BTreeMap::new(),
             release_groups: Vec::new(),
@@ -381,7 +389,7 @@ mod tests {
         );
 
         let manifest = Manifest {
-            default_workspace: "root".to_string(),
+            default_workspace: Some("root".to_string()),
             workspaces,
             groups: BTreeMap::new(),
             release_groups: Vec::new(),
@@ -441,7 +449,7 @@ mod tests {
         );
 
         let manifest = Manifest {
-            default_workspace: "api".to_string(),
+            default_workspace: Some("api".to_string()),
             workspaces,
             groups: BTreeMap::new(),
             release_groups: Vec::new(),
@@ -524,7 +532,7 @@ mod tests {
         after.insert("web".to_string(), "0.8.3".to_string());
 
         let manifest = Manifest {
-            default_workspace: "api".to_string(),
+            default_workspace: Some("api".to_string()),
             workspaces,
             groups: BTreeMap::new(),
             release_groups: vec![ReleaseGroup {

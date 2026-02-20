@@ -143,6 +143,8 @@ pub enum StoreError {
     UnknownWorkspace { name: String },
     #[error("{name:?} is a workspace group — use --all to target all workspaces within it")]
     WorkspaceIsGroup { name: String },
+    #[error("no default workspace — use -w to specify a workspace")]
+    NoDefaultWorkspace,
 }
 
 #[derive(Debug, thiserror::Error)]

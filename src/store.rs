@@ -104,7 +104,10 @@ pub fn resolve_workspace_targets(
     } else if all {
         Ok(manifest.workspaces.keys().cloned().collect())
     } else {
-        let default = &manifest.default_workspace;
+        let default = manifest
+            .default_workspace
+            .as_ref()
+            .ok_or(StoreError::NoDefaultWorkspace)?;
         if manifest.groups.contains_key(default) && !manifest.workspaces.contains_key(default) {
             return Err(StoreError::WorkspaceIsGroup {
                 name: default.clone(),
@@ -152,7 +155,8 @@ pub fn has_groups(manifest: &Manifest) -> bool {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
-    pub default_workspace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_workspace: Option<String>,
     #[serde(default)]
     pub workspaces: BTreeMap<String, Workspace>,
     /// Workspace groups: maps group path → list of direct child names (relative).
@@ -191,12 +195,14 @@ pub struct ReleaseGroup {
 impl Manifest {
     /// Returns a reference to the default workspace.
     pub fn default_workspace(&self) -> Option<&Workspace> {
-        self.workspaces.get(&self.default_workspace)
+        self.default_workspace
+            .as_ref()
+            .and_then(|key| self.workspaces.get(key))
     }
 
     /// Returns a mutable reference to the default workspace.
     pub fn default_workspace_mut(&mut self) -> Option<&mut Workspace> {
-        let key = self.default_workspace.clone();
+        let key = self.default_workspace.clone()?;
         self.workspaces.get_mut(&key)
     }
 
@@ -501,24 +507,26 @@ pub fn read_manifest(base: &Path) -> Result<Manifest, StoreError> {
         // Track root-level group
         groups.insert(".".to_string(), root.workspaces.clone());
 
-        let default_workspace = if let Some(default_ws) = root.default_workspace {
-            if !default_ws.is_empty() {
-                validate_workspace_name(&default_ws)?;
-                if !workspaces.contains_key(&default_ws) && !groups.contains_key(&default_ws) {
-                    return Err(StoreError::CorruptManifest {
-                        reason: format!(
-                            "default_workspace {default_ws:?} is not in workspaces list"
-                        ),
-                    });
+        let default_workspace: Option<String> =
+            if let Some(default_ws) = root.default_workspace {
+                if !default_ws.is_empty() {
+                    validate_workspace_name(&default_ws)?;
+                    if !workspaces.contains_key(&default_ws)
+                        && !groups.contains_key(&default_ws)
+                    {
+                        return Err(StoreError::CorruptManifest {
+                            reason: format!(
+                                "default_workspace {default_ws:?} is not in workspaces list"
+                            ),
+                        });
+                    }
+                    Some(default_ws)
+                } else {
+                    None
                 }
-            }
-            default_ws
-        } else if workspaces.contains_key(".") {
-            ".".to_string()
-        } else {
-            // Pick first leaf workspace, or empty if none
-            workspaces.keys().next().cloned().unwrap_or_default()
-        };
+            } else {
+                None
+            };
 
         return Ok(Manifest {
             default_workspace,
@@ -534,7 +542,9 @@ pub fn read_manifest(base: &Path) -> Result<Manifest, StoreError> {
             path: path.clone(),
             source,
         })?;
-        validate_workspace_name(&manifest.default_workspace)?;
+        if let Some(ref dw) = manifest.default_workspace {
+            validate_workspace_name(dw)?;
+        }
         for name in manifest.workspaces.keys() {
             validate_workspace_name(name)?;
             // Table-shape workspace names become subdirectory names under
@@ -546,9 +556,13 @@ pub fn read_manifest(base: &Path) -> Result<Manifest, StoreError> {
                 });
             }
         }
-        if manifest.default_workspace.contains('/') {
+        if manifest
+            .default_workspace
+            .as_ref()
+            .is_some_and(|dw| dw.contains('/'))
+        {
             return Err(StoreError::InvalidWorkspaceName {
-                name: manifest.default_workspace.clone(),
+                name: manifest.default_workspace.clone().unwrap_or_default(),
             });
         }
         return Ok(manifest);
@@ -573,7 +587,7 @@ pub fn read_manifest(base: &Path) -> Result<Manifest, StoreError> {
     );
 
     Ok(Manifest {
-        default_workspace: "root".to_string(),
+        default_workspace: Some("root".to_string()),
         workspaces,
         groups: BTreeMap::new(),
         release_groups: legacy.release_groups,
@@ -592,8 +606,9 @@ pub fn write_manifest(base: &Path, manifest: &Manifest) -> Result<(), StoreError
     // Default single-workspace write format stays legacy (RFC001).
     if manifest.workspaces.len() == 1 {
         let ws = manifest
-            .workspaces
-            .get(&manifest.default_workspace)
+            .default_workspace
+            .as_ref()
+            .and_then(|dw| manifest.workspaces.get(dw))
             .or_else(|| manifest.workspaces.values().next())
             .ok_or_else(|| StoreError::CorruptManifest {
                 reason: "single-workspace manifest has no workspace data".to_string(),
@@ -668,18 +683,13 @@ fn looks_like_workspace_mode_manifest(manifest: &Manifest) -> bool {
 }
 
 fn write_workspace_mode_manifest(base: &Path, manifest: &Manifest) -> Result<(), StoreError> {
-    // Validate default_workspace exists as leaf or group (empty is OK for pure roots)
-    if !manifest.default_workspace.is_empty()
-        && !manifest
-            .workspaces
-            .contains_key(&manifest.default_workspace)
-        && !manifest.groups.contains_key(&manifest.default_workspace)
+    // Validate default_workspace exists as leaf or group when set
+    if let Some(ref dw) = manifest.default_workspace
+        && !manifest.workspaces.contains_key(dw)
+        && !manifest.groups.contains_key(dw)
     {
         return Err(StoreError::CorruptManifest {
-            reason: format!(
-                "default_workspace {:?} is not in workspace map",
-                manifest.default_workspace
-            ),
+            reason: format!("default_workspace {dw:?} is not in workspace map"),
         });
     }
 
@@ -699,11 +709,7 @@ fn write_workspace_mode_manifest(base: &Path, manifest: &Manifest) -> Result<(),
 
     let mut root = WorkspaceRootManifest {
         workspaces: root_children,
-        default_workspace: if manifest.default_workspace.is_empty() {
-            None
-        } else {
-            Some(manifest.default_workspace.clone())
-        },
+        default_workspace: manifest.default_workspace.clone(),
         name: None,
         version: None,
         releases: BTreeMap::new(),
@@ -1030,7 +1036,7 @@ entries = ["patch-01def.md"]
         );
 
         let manifest = read_manifest(dir.path()).unwrap();
-        assert_eq!(manifest.default_workspace, "root");
+        assert_eq!(manifest.default_workspace.as_deref(), Some("root"));
 
         let ws = manifest.default_workspace().unwrap();
         assert_eq!(ws.path, ".");
@@ -1084,7 +1090,7 @@ after = { root = "2.0.0" }
         );
 
         let manifest = read_manifest(dir.path()).unwrap();
-        assert_eq!(manifest.default_workspace, "root");
+        assert_eq!(manifest.default_workspace.as_deref(), Some("root"));
         assert_eq!(manifest.workspaces.len(), 2);
 
         let root = manifest.workspaces.get("root").unwrap();
@@ -1129,7 +1135,7 @@ entries = ["minor-01abc.md"]
         .unwrap();
 
         let manifest = read_manifest(dir.path()).unwrap();
-        assert_eq!(manifest.default_workspace, ".");
+        assert_eq!(manifest.default_workspace.as_deref(), Some("."));
         assert_eq!(manifest.workspaces.get(".").unwrap().version, "1.0.0");
         assert_eq!(
             manifest.workspaces.get("apps/api").unwrap().version,
@@ -1195,7 +1201,7 @@ entries = ["minor-01abc.md"]
         groups.insert("apps".to_string(), vec!["api".to_string()]);
 
         let manifest = Manifest {
-            default_workspace: ".".to_string(),
+            default_workspace: Some(".".to_string()),
             workspaces,
             groups,
             release_groups: Vec::new(),
@@ -1259,7 +1265,7 @@ unknown_field = "ignored"
         .unwrap();
 
         let manifest = read_manifest(dir.path()).unwrap();
-        assert_eq!(manifest.default_workspace, ".");
+        assert_eq!(manifest.default_workspace.as_deref(), Some("."));
         assert_eq!(manifest.workspaces.get(".").unwrap().version, "1.0.0");
         assert_eq!(
             manifest.workspaces.get("apps/api").unwrap().version,
@@ -1308,7 +1314,7 @@ unknown_field = "ignored"
         after.insert("root".to_string(), "1.0.0".to_string());
 
         let manifest = Manifest {
-            default_workspace: "root".to_string(),
+            default_workspace: Some("root".to_string()),
             workspaces,
             groups: BTreeMap::new(),
             release_groups: vec![ReleaseGroup {
@@ -1322,7 +1328,7 @@ unknown_field = "ignored"
         write_manifest(dir.path(), &manifest).unwrap();
         let loaded = read_manifest(dir.path()).unwrap();
 
-        assert_eq!(loaded.default_workspace, "root");
+        assert_eq!(loaded.default_workspace.as_deref(), Some("root"));
         assert_eq!(loaded.workspaces.len(), 2);
 
         let root = loaded.workspaces.get("root").unwrap();
@@ -1356,7 +1362,7 @@ unknown_field = "ignored"
 
         // Re-read should load as new shape directly
         let reloaded = read_manifest(dir.path()).unwrap();
-        assert_eq!(reloaded.default_workspace, "root");
+        assert_eq!(reloaded.default_workspace.as_deref(), Some("root"));
         assert_eq!(reloaded.workspaces.get("root").unwrap().version, "1.0.0");
     }
 
@@ -2120,15 +2126,14 @@ version = "1.0.0"
     }
 
     #[test]
-    fn nested_workspace_default_workspace_is_first_leaf() {
+    fn nested_workspace_default_workspace_is_none() {
         let dir = setup_dir();
         setup_nested_workspace_tree(dir.path());
 
         let manifest = read_manifest(dir.path()).unwrap();
 
-        // No default_workspace specified; should pick first leaf alphabetically
-        // BTreeMap ordering: java/core, java/serialization, typescript/core, typescript/unions
-        assert_eq!(manifest.default_workspace, "java/core");
+        // No default_workspace specified — should be None
+        assert_eq!(manifest.default_workspace, None);
     }
 
     #[test]
@@ -2143,7 +2148,10 @@ version = "1.0.0"
         .unwrap();
 
         let manifest = read_manifest(dir.path()).unwrap();
-        assert_eq!(manifest.default_workspace, "typescript/core");
+        assert_eq!(
+            manifest.default_workspace.as_deref(),
+            Some("typescript/core")
+        );
     }
 
     #[test]

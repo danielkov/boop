@@ -7,10 +7,16 @@ pub fn run(base: &Path, workspace: Option<&str>) -> Result<(), VersionError> {
     store::ensure_initialized(base)?;
     let manifest = store::read_manifest(base)?;
 
-    let ws_name = workspace.unwrap_or(&manifest.default_workspace);
-    if let Some(name) = workspace {
-        store::validate_workspace_name(name)?;
-    }
+    let ws_name: &str = match workspace {
+        Some(name) => {
+            store::validate_workspace_name(name)?;
+            name
+        }
+        None => manifest
+            .default_workspace
+            .as_deref()
+            .ok_or(VersionError::Store(crate::errors::StoreError::NoDefaultWorkspace))?,
+    };
     if manifest.groups.contains_key(ws_name) && !manifest.workspaces.contains_key(ws_name) {
         return Err(VersionError::Store(
             crate::errors::StoreError::WorkspaceIsGroup {

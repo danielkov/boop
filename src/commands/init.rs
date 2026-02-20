@@ -11,6 +11,7 @@ pub fn run(
     version: Option<&str>,
     workspace: Option<&str>,
     name: Option<&str>,
+    default: bool,
 ) -> Result<(), InitError> {
     // --name without -w <path> is invalid
     if name.is_some() && !matches!(workspace, Some(p) if !p.is_empty()) {
@@ -19,7 +20,7 @@ pub fn run(
 
     match workspace {
         Some("") => run_workspace_root_init(base, version),
-        Some(ws_path) => run_workspace_init(base, version, ws_path, name),
+        Some(ws_path) => run_workspace_init(base, version, ws_path, name, default),
         None => run_root_init(base, version),
     }
 }
@@ -57,7 +58,7 @@ fn run_root_init(base: &Path, version: Option<&str>) -> Result<(), InitError> {
     );
 
     let manifest = Manifest {
-        default_workspace: "root".to_string(),
+        default_workspace: Some("root".to_string()),
         workspaces,
         groups: BTreeMap::new(),
         release_groups: Vec::new(),
@@ -85,7 +86,7 @@ fn run_workspace_root_init(base: &Path, version: Option<&str>) -> Result<(), Ini
     store::create_boop_dir(base)?;
 
     let manifest = Manifest {
-        default_workspace: String::new(),
+        default_workspace: None,
         workspaces: BTreeMap::new(),
         groups: {
             let mut g = BTreeMap::new();
@@ -104,6 +105,7 @@ fn run_workspace_init(
     version: Option<&str>,
     ws_path: &str,
     name: Option<&str>,
+    default: bool,
 ) -> Result<(), InitError> {
     // 1. Require .boop/ exists
     if !store::is_initialized(base) {
@@ -146,7 +148,7 @@ fn run_workspace_init(
                 },
             );
         }
-        manifest.default_workspace = ".".to_string();
+        manifest.default_workspace = None;
         manifest.groups.insert(
             ".".to_string(),
             vec![".".to_string(), top_segment.to_string()],
@@ -222,9 +224,8 @@ fn run_workspace_init(
         },
     );
 
-    // Set default_workspace if not yet set (first workspace in a pure root)
-    if manifest.default_workspace.is_empty() {
-        manifest.default_workspace = ws_key.clone();
+    if default {
+        manifest.default_workspace = Some(ws_key.clone());
     }
 
     // 9. Write manifest and create changelogs dir
@@ -269,7 +270,7 @@ mod tests {
     #[test]
     fn creates_boop_dir_and_changelogs() {
         let dir = setup_dir();
-        run(dir.path(), None, None, None).unwrap();
+        run(dir.path(), None, None, None, false).unwrap();
         assert!(dir.path().join(".boop").exists());
         assert!(dir.path().join(".boop/changelogs").exists());
         // Single-workspace init should NOT create a root/ subdirectory
@@ -279,7 +280,7 @@ mod tests {
     #[test]
     fn creates_releases_toml_with_default_version() {
         let dir = setup_dir();
-        run(dir.path(), None, None, None).unwrap();
+        run(dir.path(), None, None, None, false).unwrap();
         let manifest = store::read_manifest(dir.path()).unwrap();
         let ws = manifest.default_workspace().unwrap();
         assert_eq!(ws.version, "0.0.1");
@@ -290,7 +291,7 @@ mod tests {
     #[test]
     fn creates_releases_toml_with_explicit_version() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.2.3"), None, None).unwrap();
+        run(dir.path(), Some("1.2.3"), None, None, false).unwrap();
         let manifest = store::read_manifest(dir.path()).unwrap();
         let ws = manifest.default_workspace().unwrap();
         assert_eq!(ws.version, "1.2.3");
@@ -299,15 +300,15 @@ mod tests {
     #[test]
     fn errors_if_already_initialized() {
         let dir = setup_dir();
-        run(dir.path(), None, None, None).unwrap();
-        let err = run(dir.path(), None, None, None).unwrap_err();
+        run(dir.path(), None, None, None, false).unwrap();
+        let err = run(dir.path(), None, None, None, false).unwrap_err();
         assert!(matches!(err, InitError::AlreadyInitialized { .. }));
     }
 
     #[test]
     fn errors_on_invalid_semver() {
         let dir = setup_dir();
-        let err = run(dir.path(), Some("not-a-version"), None, None).unwrap_err();
+        let err = run(dir.path(), Some("not-a-version"), None, None, false).unwrap_err();
         assert!(matches!(err, InitError::InvalidVersion { .. }));
     }
 
@@ -319,7 +320,7 @@ mod tests {
             "[package]\nname = \"test\"\nversion = \"3.0.0\"\n",
         )
         .unwrap();
-        run(dir.path(), None, None, None).unwrap();
+        run(dir.path(), None, None, None, false).unwrap();
         let manifest = store::read_manifest(dir.path()).unwrap();
         assert_eq!(manifest.default_workspace().unwrap().version, "3.0.0");
     }
@@ -332,7 +333,7 @@ mod tests {
             "[package]\nname = \"test\"\nversion = \"3.0.0\"\n",
         )
         .unwrap();
-        run(dir.path(), Some("5.0.0"), None, None).unwrap();
+        run(dir.path(), Some("5.0.0"), None, None, false).unwrap();
         let manifest = store::read_manifest(dir.path()).unwrap();
         assert_eq!(manifest.default_workspace().unwrap().version, "5.0.0");
     }
@@ -341,7 +342,7 @@ mod tests {
     fn falls_back_to_default_when_no_heuristic_match() {
         let dir = setup_dir();
         // No package manifest files → should fall back to 0.0.1
-        run(dir.path(), None, None, None).unwrap();
+        run(dir.path(), None, None, None, false).unwrap();
         let manifest = store::read_manifest(dir.path()).unwrap();
         assert_eq!(manifest.default_workspace().unwrap().version, "0.0.1");
     }
@@ -349,7 +350,7 @@ mod tests {
     #[test]
     fn init_writes_legacy_manifest_shape_by_default() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.2.3"), None, None).unwrap();
+        run(dir.path(), Some("1.2.3"), None, None, false).unwrap();
 
         let content = fs::read_to_string(dir.path().join(".boop/releases.toml")).unwrap();
         let value: toml::Value = toml::from_str(&content).unwrap();
@@ -363,17 +364,17 @@ mod tests {
     #[test]
     fn workspace_init_auto_converts_root_and_creates_group() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None).unwrap();
+        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
 
         // Add workspace
-        run(dir.path(), None, Some("apps/api"), None).unwrap();
+        run(dir.path(), None, Some("apps/api"), None, false).unwrap();
 
         let manifest = store::read_manifest(dir.path()).unwrap();
 
         // Root workspace should be "." now
         assert!(manifest.workspaces.contains_key("."));
         assert_eq!(manifest.workspaces.get(".").unwrap().version, "1.0.0");
-        assert_eq!(manifest.default_workspace, ".");
+        assert_eq!(manifest.default_workspace, None);
 
         // New workspace should exist
         assert!(manifest.workspaces.contains_key("apps/api"));
@@ -405,9 +406,9 @@ mod tests {
     #[test]
     fn workspace_init_with_name_creates_named_workspace() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None).unwrap();
+        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
 
-        run(dir.path(), None, Some("apps/api"), Some("backend")).unwrap();
+        run(dir.path(), None, Some("apps/api"), Some("backend"), false).unwrap();
 
         let manifest = store::read_manifest(dir.path()).unwrap();
 
@@ -425,31 +426,31 @@ mod tests {
     fn workspace_init_errors_without_prior_init() {
         let dir = setup_dir();
         // No init done
-        let err = run(dir.path(), None, Some("apps/api"), None).unwrap_err();
+        let err = run(dir.path(), None, Some("apps/api"), None, false).unwrap_err();
         assert!(matches!(err, InitError::NotInitialized));
     }
 
     #[test]
     fn workspace_init_errors_parent_is_leaf() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None).unwrap();
+        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
 
         // Add "apps" as a leaf workspace
-        run(dir.path(), None, Some("apps"), None).unwrap();
+        run(dir.path(), None, Some("apps"), None, false).unwrap();
 
         // Try to add "apps/api" — "apps" is a leaf, not a group
-        let err = run(dir.path(), None, Some("apps/api"), None).unwrap_err();
+        let err = run(dir.path(), None, Some("apps/api"), None, false).unwrap_err();
         assert!(matches!(err, InitError::ParentIsLeaf { ref path } if path == "apps"));
     }
 
     #[test]
     fn workspace_init_idempotent() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None).unwrap();
+        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
 
-        run(dir.path(), None, Some("apps/api"), None).unwrap();
+        run(dir.path(), None, Some("apps/api"), None, false).unwrap();
         // Second call should be a no-op
-        run(dir.path(), None, Some("apps/api"), None).unwrap();
+        run(dir.path(), None, Some("apps/api"), None, false).unwrap();
 
         let manifest = store::read_manifest(dir.path()).unwrap();
         assert_eq!(manifest.workspaces.len(), 2); // "." and "apps/api"
@@ -458,16 +459,16 @@ mod tests {
     #[test]
     fn name_without_workspace_errors() {
         let dir = setup_dir();
-        let err = run(dir.path(), None, None, Some("foo")).unwrap_err();
+        let err = run(dir.path(), None, None, Some("foo"), false).unwrap_err();
         assert!(matches!(err, InitError::NameWithoutWorkspace));
     }
 
     #[test]
     fn workspace_init_single_segment_path() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None).unwrap();
+        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
 
-        run(dir.path(), None, Some("api"), None).unwrap();
+        run(dir.path(), None, Some("api"), None, false).unwrap();
 
         let manifest = store::read_manifest(dir.path()).unwrap();
         assert!(manifest.workspaces.contains_key("api"));
@@ -480,9 +481,9 @@ mod tests {
     #[test]
     fn workspace_init_single_segment_with_name() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None).unwrap();
+        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
 
-        run(dir.path(), None, Some("api"), Some("backend")).unwrap();
+        run(dir.path(), None, Some("api"), Some("backend"), false).unwrap();
 
         let manifest = store::read_manifest(dir.path()).unwrap();
         // Key = name for single segment
@@ -495,7 +496,7 @@ mod tests {
     #[test]
     fn workspace_init_preserves_root_releases() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None).unwrap();
+        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
 
         // The root init creates a baseline release for 1.0.0
         let manifest = store::read_manifest(dir.path()).unwrap();
@@ -509,7 +510,7 @@ mod tests {
         );
 
         // Add workspace — root should be converted to "." preserving releases
-        run(dir.path(), None, Some("api"), None).unwrap();
+        run(dir.path(), None, Some("api"), None, false).unwrap();
 
         let manifest = store::read_manifest(dir.path()).unwrap();
         let root = manifest.workspaces.get(".").unwrap();
@@ -519,11 +520,11 @@ mod tests {
     #[test]
     fn workspace_init_multiple_workspaces() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None).unwrap();
+        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
 
-        run(dir.path(), None, Some("apps/api"), None).unwrap();
-        run(dir.path(), None, Some("apps/web"), None).unwrap();
-        run(dir.path(), None, Some("libs/core"), None).unwrap();
+        run(dir.path(), None, Some("apps/api"), None, false).unwrap();
+        run(dir.path(), None, Some("apps/web"), None, false).unwrap();
+        run(dir.path(), None, Some("libs/core"), None, false).unwrap();
 
         let manifest = store::read_manifest(dir.path()).unwrap();
         assert_eq!(manifest.workspaces.len(), 4); // ".", "apps/api", "apps/web", "libs/core"
@@ -549,8 +550,8 @@ mod tests {
     #[test]
     fn workspace_init_round_trip() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None).unwrap();
-        run(dir.path(), None, Some("apps/api"), None).unwrap();
+        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
+        run(dir.path(), None, Some("apps/api"), None, false).unwrap();
 
         let manifest = store::read_manifest(dir.path()).unwrap();
         store::write_manifest(dir.path(), &manifest).unwrap();

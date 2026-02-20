@@ -43,7 +43,13 @@ pub fn run(base: &Path) -> Result<(), RevertError> {
         return Err(RevertError::NothingToRevert);
     }
 
-    let ws_name = manifest.default_workspace.clone();
+    // Single workspace — just use the only one
+    let ws_name = manifest
+        .workspaces
+        .keys()
+        .next()
+        .cloned()
+        .ok_or(RevertError::NothingToRevert)?;
     let (current_version, next_version) = {
         let ws = manifest
             .workspaces
