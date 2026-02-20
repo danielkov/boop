@@ -3,6 +3,19 @@ use std::path::Path;
 use crate::errors::VersionError;
 use crate::store;
 
+pub fn run_all_json(base: &Path) -> Result<(), VersionError> {
+    store::ensure_initialized(base)?;
+    let manifest = store::read_manifest(base)?;
+    let rg = manifest
+        .release_groups
+        .last()
+        .ok_or(VersionError::NoReleaseGroups)?;
+    let json =
+        serde_json::to_string(&rg.after).expect("BTreeMap<String, String> is always valid JSON");
+    println!("{json}");
+    Ok(())
+}
+
 pub fn run(base: &Path, workspace: Option<&str>) -> Result<(), VersionError> {
     store::ensure_initialized(base)?;
     let manifest = store::read_manifest(base)?;
@@ -15,7 +28,9 @@ pub fn run(base: &Path, workspace: Option<&str>) -> Result<(), VersionError> {
         None => manifest
             .default_workspace
             .as_deref()
-            .ok_or(VersionError::Store(crate::errors::StoreError::NoDefaultWorkspace))?,
+            .ok_or(VersionError::Store(
+                crate::errors::StoreError::NoDefaultWorkspace,
+            ))?,
     };
     if manifest.groups.contains_key(ws_name) && !manifest.workspaces.contains_key(ws_name) {
         return Err(VersionError::Store(

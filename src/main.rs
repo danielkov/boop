@@ -11,16 +11,18 @@ struct Cli {
 enum Commands {
     /// Initialize .boop/ directory
     Init {
-        /// Initial version (overrides auto-detection)
+        /// Directory to initialize (relative to cwd)
+        dir: Option<String>,
+        /// Create a workspace group instead of a leaf
+        #[arg(short = 'w', long = "workspace")]
+        workspace: bool,
+        /// Custom name for the workspace or group
+        #[arg(short = 'n', long = "name")]
+        name: Option<String>,
+        /// Initial version (overrides auto-detection, leaves only)
         #[arg(long)]
         version: Option<String>,
-        /// Add a workspace at the given path, or use bare -w to create a workspace root
-        #[arg(short = 'w', long = "workspace", num_args = 0..=1, default_missing_value = "")]
-        workspace: Option<String>,
-        /// Set a custom workspace name (key segment) that differs from the directory name
-        #[arg(long)]
-        name: Option<String>,
-        /// Set the new workspace as the default for commands that don't specify -w
+        /// Set as default workspace
         #[arg(long)]
         default: bool,
     },
@@ -90,6 +92,9 @@ enum Commands {
         /// Filter by release group ID
         #[arg(long)]
         group: Option<String>,
+        /// Print all workspaces from last release group as JSON
+        #[arg(long)]
+        all_json: bool,
     },
 
     /// Revert the most recent apply
@@ -107,6 +112,9 @@ enum Commands {
         /// Workspace name
         #[arg(short = 'w', long = "workspace")]
         workspace: Option<String>,
+        /// Print all workspaces from last release group as JSON
+        #[arg(long)]
+        all_json: bool,
     },
 }
 
@@ -119,16 +127,18 @@ fn run(command: Commands) -> Result<(), boop::errors::BoopError> {
 
     match command {
         Commands::Init {
-            version,
+            dir,
             workspace,
             name,
+            version,
             default,
         } => {
             boop::commands::init::run(
                 &base,
-                version.as_deref(),
-                workspace.as_deref(),
+                dir.as_deref(),
+                workspace,
                 name.as_deref(),
+                version.as_deref(),
                 default,
             )?;
         }
@@ -194,13 +204,18 @@ fn run(command: Commands) -> Result<(), boop::errors::BoopError> {
             range,
             workspace,
             group,
+            all_json,
         } => {
-            boop::commands::changelog::run(
-                &base,
-                range.as_deref(),
-                workspace.as_deref(),
-                group.as_deref(),
-            )?;
+            if all_json {
+                boop::commands::changelog::run_all_json(&base)?;
+            } else {
+                boop::commands::changelog::run(
+                    &base,
+                    range.as_deref(),
+                    workspace.as_deref(),
+                    group.as_deref(),
+                )?;
+            }
         }
         Commands::Revert => {
             boop::commands::revert::run(&base)?;
@@ -208,8 +223,15 @@ fn run(command: Commands) -> Result<(), boop::errors::BoopError> {
         Commands::Status { workspace } => {
             boop::commands::status::run(&base, workspace.as_deref())?;
         }
-        Commands::Version { workspace } => {
-            boop::commands::version::run(&base, workspace.as_deref())?;
+        Commands::Version {
+            workspace,
+            all_json,
+        } => {
+            if all_json {
+                boop::commands::version::run_all_json(&base)?;
+            } else {
+                boop::commands::version::run(&base, workspace.as_deref())?;
+            }
         }
     }
 

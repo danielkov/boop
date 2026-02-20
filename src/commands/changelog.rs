@@ -1,10 +1,79 @@
 // boop changelog — history query
 
+use std::collections::BTreeMap;
 use std::path::Path;
+
+use serde::Serialize;
 
 use crate::assembly::assemble_changelog_for_workspace;
 use crate::errors::{BoopError, ChangelogError};
 use crate::store;
+use crate::version;
+
+#[derive(Serialize)]
+struct ChangesByKind {
+    major: Vec<String>,
+    minor: Vec<String>,
+    patch: Vec<String>,
+}
+
+pub fn run_all_json(base: &Path) -> Result<(), BoopError> {
+    store::ensure_initialized(base).map_err(|_| ChangelogError::NotInitialized)?;
+    let manifest = store::read_manifest(base).map_err(ChangelogError::Store)?;
+    store::maybe_migrate_to_multi(base, &manifest).map_err(ChangelogError::Store)?;
+
+    let rg = manifest
+        .release_groups
+        .last()
+        .ok_or(ChangelogError::NoReleaseGroups)?;
+
+    let mut result: BTreeMap<String, ChangesByKind> = BTreeMap::new();
+
+    for ws_name in &rg.workspaces {
+        let version = rg
+            .after
+            .get(ws_name)
+            .ok_or_else(|| ChangelogError::WorkspaceNotFound {
+                name: ws_name.clone(),
+            })?;
+        let ws =
+            manifest
+                .workspaces
+                .get(ws_name)
+                .ok_or_else(|| ChangelogError::WorkspaceNotFound {
+                    name: ws_name.clone(),
+                })?;
+        let release = ws
+            .releases
+            .get(version)
+            .ok_or_else(|| ChangelogError::VersionNotFound {
+                version: version.clone(),
+            })?;
+
+        let mut by_kind = ChangesByKind {
+            major: Vec::new(),
+            minor: Vec::new(),
+            patch: Vec::new(),
+        };
+
+        for entry_name in &release.entries {
+            let content = store::read_entry_for_workspace(base, &manifest, ws_name, entry_name)
+                .map_err(ChangelogError::Store)?;
+            match version::parse_kind(entry_name) {
+                Some(version::BumpKind::Major) => by_kind.major.push(content),
+                Some(version::BumpKind::Minor) => by_kind.minor.push(content),
+                Some(version::BumpKind::Patch) => by_kind.patch.push(content),
+                None => by_kind.patch.push(content),
+            }
+        }
+
+        result.insert(ws_name.clone(), by_kind);
+    }
+
+    let json = serde_json::to_string(&result).expect("serialization should not fail");
+    println!("{json}");
+    Ok(())
+}
 
 pub fn run(
     base: &Path,

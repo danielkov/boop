@@ -30,8 +30,12 @@ pub enum InitError {
     NotInitialized,
     #[error("cannot add workspace under {path}: it is a leaf workspace, not a group")]
     ParentIsLeaf { path: String },
-    #[error("--name requires -w")]
-    NameWithoutWorkspace,
+    #[error(
+        "no parent workspace group found for {path} — create one with `boop init -w <path>` first"
+    )]
+    NoParentGroup { path: String },
+    #[error("name {name:?} already exists as a workspace or group")]
+    NameCollision { name: String },
     #[error("invalid version: {input}")]
     InvalidVersion { input: String },
     #[error(transparent)]
@@ -84,6 +88,8 @@ pub enum ChangelogError {
     VersionNotFound { version: String },
     #[error("invalid range: {input}")]
     InvalidRange { input: String },
+    #[error("no release groups found — run `boop apply` first")]
+    NoReleaseGroups,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -149,6 +155,8 @@ pub enum StoreError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum VersionError {
+    #[error("no release groups found — run `boop apply` first")]
+    NoReleaseGroups,
     #[error("invalid version: {input}")]
     InvalidVersion { input: String },
     #[error("unknown workspace: {name}")]

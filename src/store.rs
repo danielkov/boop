@@ -8,6 +8,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::StoreError;
 
+/// Info about a workspace group (a node that contains children, not a leaf workspace).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupInfo {
+    /// Filesystem path relative to project root (e.g., "changelogs/typescript" or ".")
+    pub path: String,
+    /// On-disk child paths (relative to this group's path)
+    pub children: Vec<String>,
+}
+
 /// Validates that a workspace name contains only safe characters.
 /// In workspace mode this is a path-like selector (e.g. `apps/api` or `.`).
 pub fn validate_workspace_name(name: &str) -> Result<(), StoreError> {
@@ -42,15 +51,6 @@ pub fn validate_workspace_name(name: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Returns `true` if `s` is a valid single-segment workspace name
-/// (suitable for use as a key override via the `name` field).
-fn is_valid_name_segment(s: &str) -> bool {
-    !s.is_empty()
-        && !s.contains('/')
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
 /// Splits a comma-separated workspace selector, trims whitespace, and
 /// validates each name. Returns the list of workspace name strings.
 pub fn parse_workspace_csv(csv: &str) -> Result<Vec<String>, StoreError> {
@@ -61,8 +61,59 @@ pub fn parse_workspace_csv(csv: &str) -> Result<Vec<String>, StoreError> {
     Ok(names)
 }
 
+/// Resolve a single workspace selector using longest-prefix matching:
+/// 1. Exact match as workspace name → Some leaf
+/// 2. Exact match as group name → Some group (caller decides how to handle)
+/// 3. Longest prefix that matches a group name, remainder is child lookup
+/// 4. None if nothing matches
+fn resolve_selector(manifest: &Manifest, selector: &str) -> Option<ResolvedSelector> {
+    // 1. Exact match as workspace name
+    if manifest.workspaces.contains_key(selector) {
+        return Some(ResolvedSelector::Leaf(selector.to_string()));
+    }
+    // 2. Exact match as group name
+    if manifest.groups.contains_key(selector) {
+        return Some(ResolvedSelector::Group(selector.to_string()));
+    }
+    // 3. Longest-prefix matching: try progressively shorter prefixes
+    let parts: Vec<&str> = selector.split('/').collect();
+    for i in (1..parts.len()).rev() {
+        let prefix = parts[..i].join("/");
+        let remainder = parts[i..].join("/");
+        if manifest.groups.contains_key(&prefix) {
+            // Look up remainder as a workspace name
+            if manifest.workspaces.contains_key(&remainder) {
+                return Some(ResolvedSelector::Leaf(remainder));
+            }
+            // Look up remainder as a group name
+            if manifest.groups.contains_key(&remainder) {
+                return Some(ResolvedSelector::Group(remainder));
+            }
+            // Try constructing full path from group path + remainder and look up by path
+            let group = &manifest.groups[&prefix];
+            let child_path = if group.path == "." {
+                remainder.clone()
+            } else {
+                format!("{}/{}", group.path, remainder)
+            };
+            if let Some(ws_key) = manifest.workspace_key_for_path(&child_path) {
+                return Some(ResolvedSelector::Leaf(ws_key.to_string()));
+            }
+            if let Some(grp_key) = manifest.group_key_for_path(&child_path) {
+                return Some(ResolvedSelector::Group(grp_key.to_string()));
+            }
+        }
+    }
+    None
+}
+
+enum ResolvedSelector {
+    Leaf(String),
+    Group(String),
+}
+
 /// Resolve workspace targets from `-w` and `--all` flags.
-/// Returns a list of leaf workspace paths.
+/// Returns a list of leaf workspace keys.
 ///
 /// Rules:
 /// - Without `--all`: each `-w` name must be a leaf workspace
@@ -79,27 +130,27 @@ pub fn resolve_workspace_targets(
         if all {
             let mut resolved = Vec::new();
             for name in &names {
-                if manifest.workspaces.contains_key(name) {
-                    resolved.push(name.clone());
-                } else if manifest.groups.contains_key(name) {
-                    resolved.extend(leaf_workspaces_under(manifest, name));
-                } else {
-                    return Err(StoreError::UnknownWorkspace { name: name.clone() });
+                match resolve_selector(manifest, name) {
+                    Some(ResolvedSelector::Leaf(key)) => resolved.push(key),
+                    Some(ResolvedSelector::Group(key)) => {
+                        resolved.extend(leaf_workspaces_under(manifest, &key));
+                    }
+                    None => return Err(StoreError::UnknownWorkspace { name: name.clone() }),
                 }
             }
             Ok(resolved)
         } else {
+            let mut resolved = Vec::new();
             for name in &names {
-                if manifest.groups.contains_key(name)
-                    && !manifest.workspaces.contains_key(name)
-                {
-                    return Err(StoreError::WorkspaceIsGroup { name: name.clone() });
-                }
-                if !manifest.workspaces.contains_key(name) {
-                    return Err(StoreError::UnknownWorkspace { name: name.clone() });
+                match resolve_selector(manifest, name) {
+                    Some(ResolvedSelector::Leaf(key)) => resolved.push(key),
+                    Some(ResolvedSelector::Group(key)) => {
+                        return Err(StoreError::WorkspaceIsGroup { name: key });
+                    }
+                    None => return Err(StoreError::UnknownWorkspace { name: name.clone() }),
                 }
             }
-            Ok(names)
+            Ok(resolved)
         }
     } else if all {
         Ok(manifest.workspaces.keys().cloned().collect())
@@ -123,19 +174,19 @@ pub fn resolve_workspace_targets(
 }
 
 /// Get all leaf workspace keys under a group, recursively.
-pub fn leaf_workspaces_under(manifest: &Manifest, group_path: &str) -> Vec<String> {
+pub fn leaf_workspaces_under(manifest: &Manifest, group_name: &str) -> Vec<String> {
     let mut leaves = Vec::new();
-    if let Some(children) = manifest.groups.get(group_path) {
-        for child in children {
-            let full_path = if group_path == "." {
+    if let Some(group) = manifest.groups.get(group_name) {
+        for child in &group.children {
+            let full_path = if group.path == "." {
                 child.clone()
             } else {
-                format!("{group_path}/{child}")
+                format!("{}/{child}", group.path)
             };
             if let Some(key) = manifest.workspace_key_for_path(&full_path) {
                 leaves.push(key.to_string());
-            } else if manifest.groups.contains_key(&full_path) {
-                leaves.extend(leaf_workspaces_under(manifest, &full_path));
+            } else if let Some(sub_key) = manifest.group_key_for_path(&full_path) {
+                leaves.extend(leaf_workspaces_under(manifest, sub_key));
             }
         }
     }
@@ -147,10 +198,16 @@ pub fn has_groups(manifest: &Manifest) -> bool {
     // Groups always includes "." for the root; actual nesting means there
     // are groups beyond just root, or root's children include other groups.
     manifest.groups.len() > 1
-        || manifest
-            .groups
-            .get(".")
-            .is_some_and(|children| children.iter().any(|c| manifest.groups.contains_key(c)))
+        || manifest.groups.get(".").is_some_and(|root| {
+            root.children.iter().any(|c| {
+                let full_path = if root.path == "." {
+                    c.clone()
+                } else {
+                    format!("{}/{c}", root.path)
+                };
+                manifest.group_key_for_path(&full_path).is_some()
+            })
+        })
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -159,10 +216,10 @@ pub struct Manifest {
     pub default_workspace: Option<String>,
     #[serde(default)]
     pub workspaces: BTreeMap<String, Workspace>,
-    /// Workspace groups: maps group path → list of direct child names (relative).
+    /// Workspace groups: maps group name → GroupInfo { path, children }.
     /// `"."` represents the root manifest's children.
     #[serde(skip)]
-    pub groups: BTreeMap<String, Vec<String>>,
+    pub groups: BTreeMap<String, GroupInfo>,
     #[serde(default)]
     pub release_groups: Vec<ReleaseGroup>,
 }
@@ -212,6 +269,15 @@ impl Manifest {
         self.workspaces
             .iter()
             .find(|(_, ws)| ws.path == path)
+            .map(|(key, _)| key.as_str())
+    }
+
+    /// Look up a group key (name) by its filesystem path.
+    /// Returns `None` if no group has that path.
+    pub fn group_key_for_path(&self, path: &str) -> Option<&str> {
+        self.groups
+            .iter()
+            .find(|(_, g)| g.path == path)
             .map(|(key, _)| key.as_str())
     }
 }
@@ -368,14 +434,14 @@ pub fn ensure_changelogs_dir_scoped(
 }
 
 /// Recursively load workspace entries from nested manifests.
-/// `parent_path` is the fully qualified path of the parent ("." for root).
-/// `children` are the relative child names from the parent's `workspaces` array.
+/// `parent_path` is the fully qualified filesystem path of the parent ("." for root).
+/// `children` are the relative child paths from the parent's `workspaces` array.
 fn load_workspace_tree(
     base: &Path,
     parent_path: &str,
     children: &[String],
     workspaces: &mut BTreeMap<String, Workspace>,
-    groups: &mut BTreeMap<String, Vec<String>>,
+    groups: &mut BTreeMap<String, GroupInfo>,
 ) -> Result<(), StoreError> {
     for child_rel in children {
         let full_path = if parent_path == "." {
@@ -403,15 +469,22 @@ fn load_workspace_tree(
                     path: ws_manifest_path,
                     source,
                 })?;
-            if sub_root.workspaces.is_empty() {
-                return Err(StoreError::CorruptManifest {
-                    reason: format!("workspaces list is empty in {full_path}"),
-                });
-            }
             for sub_child in &sub_root.workspaces {
                 validate_workspace_name(sub_child)?;
             }
-            groups.insert(full_path.clone(), sub_root.workspaces.clone());
+            // Use name field as group key if it's a valid workspace name,
+            // otherwise fall back to full_path for backward compatibility
+            let group_key = match &sub_root.name {
+                Some(n) if validate_workspace_name(n).is_ok() => n.clone(),
+                _ => full_path.clone(),
+            };
+            groups.insert(
+                group_key,
+                GroupInfo {
+                    path: full_path.clone(),
+                    children: sub_root.workspaces.clone(),
+                },
+            );
             load_workspace_tree(base, &full_path, &sub_root.workspaces, workspaces, groups)?;
         } else {
             // It's a leaf workspace
@@ -420,19 +493,11 @@ fn load_workspace_tree(
                     path: ws_manifest_path,
                     source,
                 })?;
-            // Use name as key segment when it's a valid single segment
-            let key = if let Some(ref n) = ws_legacy.name {
-                if is_valid_name_segment(n) {
-                    if parent_path == "." {
-                        n.clone()
-                    } else {
-                        format!("{parent_path}/{n}")
-                    }
-                } else {
-                    full_path.clone()
-                }
-            } else {
-                full_path.clone()
+            // Use name field as workspace key if it's a valid workspace name,
+            // otherwise fall back to full_path for backward compatibility
+            let key = match &ws_legacy.name {
+                Some(n) if validate_workspace_name(n).is_ok() => n.clone(),
+                _ => full_path.clone(),
             };
             workspaces.insert(
                 key,
@@ -505,28 +570,31 @@ pub fn read_manifest(base: &Path) -> Result<Manifest, StoreError> {
         load_workspace_tree(base, ".", &non_root, &mut workspaces, &mut groups)?;
 
         // Track root-level group
-        groups.insert(".".to_string(), root.workspaces.clone());
+        groups.insert(
+            ".".to_string(),
+            GroupInfo {
+                path: ".".to_string(),
+                children: root.workspaces.clone(),
+            },
+        );
 
-        let default_workspace: Option<String> =
-            if let Some(default_ws) = root.default_workspace {
-                if !default_ws.is_empty() {
-                    validate_workspace_name(&default_ws)?;
-                    if !workspaces.contains_key(&default_ws)
-                        && !groups.contains_key(&default_ws)
-                    {
-                        return Err(StoreError::CorruptManifest {
-                            reason: format!(
-                                "default_workspace {default_ws:?} is not in workspaces list"
-                            ),
-                        });
-                    }
-                    Some(default_ws)
-                } else {
-                    None
+        let default_workspace: Option<String> = if let Some(default_ws) = root.default_workspace {
+            if !default_ws.is_empty() {
+                validate_workspace_name(&default_ws)?;
+                if !workspaces.contains_key(&default_ws) && !groups.contains_key(&default_ws) {
+                    return Err(StoreError::CorruptManifest {
+                        reason: format!(
+                            "default_workspace {default_ws:?} is not in workspaces list"
+                        ),
+                    });
                 }
+                Some(default_ws)
             } else {
                 None
-            };
+            }
+        } else {
+            None
+        };
 
         return Ok(Manifest {
             default_workspace,
@@ -701,8 +769,8 @@ fn write_workspace_mode_manifest(base: &Path, manifest: &Manifest) -> Result<(),
     }
 
     // Determine root-level children from groups or fall back to flat workspace list
-    let root_children: Vec<String> = if let Some(children) = manifest.groups.get(".") {
-        children.clone()
+    let root_children: Vec<String> = if let Some(root_group) = manifest.groups.get(".") {
+        root_group.children.clone()
     } else {
         manifest.workspaces.keys().cloned().collect()
     };
@@ -731,19 +799,19 @@ fn write_workspace_mode_manifest(base: &Path, manifest: &Manifest) -> Result<(),
     })?;
 
     // Write group manifests (intermediate workspace groups)
-    for (group_path, children) in &manifest.groups {
-        if group_path == "." {
+    for (group_name, group) in &manifest.groups {
+        if group_name == "." {
             continue; // Already written as root manifest
         }
         let group_manifest = WorkspaceRootManifest {
-            workspaces: children.clone(),
+            workspaces: group.children.clone(),
             default_workspace: None,
-            name: None,
+            name: Some(group_name.clone()),
             version: None,
             releases: BTreeMap::new(),
             release_groups: Vec::new(),
         };
-        let ws_boop = base.join(group_path).join(".boop");
+        let ws_boop = base.join(&group.path).join(".boop");
         fs::create_dir_all(&ws_boop).map_err(|source| StoreError::Write {
             path: ws_boop.clone(),
             source,
@@ -1197,8 +1265,20 @@ entries = ["minor-01abc.md"]
         );
 
         let mut groups = BTreeMap::new();
-        groups.insert(".".to_string(), vec![".".to_string(), "apps".to_string()]);
-        groups.insert("apps".to_string(), vec!["api".to_string()]);
+        groups.insert(
+            ".".to_string(),
+            GroupInfo {
+                path: ".".to_string(),
+                children: vec![".".to_string(), "apps".to_string()],
+            },
+        );
+        groups.insert(
+            "apps".to_string(),
+            GroupInfo {
+                path: "apps".to_string(),
+                children: vec!["api".to_string()],
+            },
+        );
 
         let manifest = Manifest {
             default_workspace: Some(".".to_string()),
@@ -2112,17 +2192,23 @@ version = "1.0.0"
         // Should have 3 groups: ".", "typescript", "java"
         assert_eq!(manifest.groups.len(), 3);
         assert_eq!(
-            manifest.groups.get(".").unwrap(),
-            &vec!["typescript".to_string(), "java".to_string()]
+            manifest.groups.get(".").unwrap().children,
+            vec!["typescript".to_string(), "java".to_string()]
+        );
+        assert_eq!(manifest.groups.get(".").unwrap().path, ".");
+        assert_eq!(
+            manifest.groups.get("typescript").unwrap().children,
+            vec!["core".to_string(), "unions".to_string()]
         );
         assert_eq!(
-            manifest.groups.get("typescript").unwrap(),
-            &vec!["core".to_string(), "unions".to_string()]
+            manifest.groups.get("typescript").unwrap().path,
+            "typescript"
         );
         assert_eq!(
-            manifest.groups.get("java").unwrap(),
-            &vec!["core".to_string(), "serialization".to_string()]
+            manifest.groups.get("java").unwrap().children,
+            vec!["core".to_string(), "serialization".to_string()]
         );
+        assert_eq!(manifest.groups.get("java").unwrap().path, "java");
     }
 
     #[test]

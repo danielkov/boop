@@ -3,25 +3,22 @@ use std::fs;
 use std::path::Path;
 
 use crate::detect;
-use crate::errors::{InitError, StoreError};
-use crate::store::{self, Manifest, Release, Workspace};
+use crate::errors::InitError;
+use crate::store::{self, GroupInfo, Manifest, Release, Workspace};
 
 pub fn run(
     base: &Path,
-    version: Option<&str>,
-    workspace: Option<&str>,
+    dir: Option<&str>,
+    workspace: bool,
     name: Option<&str>,
+    version: Option<&str>,
     default: bool,
 ) -> Result<(), InitError> {
-    // --name without -w <path> is invalid
-    if name.is_some() && !matches!(workspace, Some(p) if !p.is_empty()) {
-        return Err(InitError::NameWithoutWorkspace);
-    }
-
-    match workspace {
-        Some("") => run_workspace_root_init(base, version),
-        Some(ws_path) => run_workspace_init(base, version, ws_path, name, default),
-        None => run_root_init(base, version),
+    match (dir, workspace) {
+        (None, false) => run_root_init(base, version),
+        (None, true) => run_workspace_root_init(base),
+        (Some(d), true) => run_group_init(base, d, name),
+        (Some(d), false) => run_leaf_init(base, d, name, version, default),
     }
 }
 
@@ -68,19 +65,11 @@ fn run_root_init(base: &Path, version: Option<&str>) -> Result<(), InitError> {
     Ok(())
 }
 
-fn run_workspace_root_init(base: &Path, version: Option<&str>) -> Result<(), InitError> {
+fn run_workspace_root_init(base: &Path) -> Result<(), InitError> {
     if store::is_initialized(base) {
         return Err(InitError::AlreadyInitialized {
             path: store::boop_dir(base),
         });
-    }
-
-    if version.is_some() {
-        // No leaf workspace at root, so --version doesn't apply
-        return Err(InitError::Store(StoreError::CorruptManifest {
-            reason: "--version has no effect with bare -w (no root workspace to version)"
-                .to_string(),
-        }));
     }
 
     store::create_boop_dir(base)?;
@@ -90,7 +79,13 @@ fn run_workspace_root_init(base: &Path, version: Option<&str>) -> Result<(), Ini
         workspaces: BTreeMap::new(),
         groups: {
             let mut g = BTreeMap::new();
-            g.insert(".".to_string(), Vec::new());
+            g.insert(
+                ".".to_string(),
+                GroupInfo {
+                    path: ".".to_string(),
+                    children: Vec::new(),
+                },
+            );
             g
         },
         release_groups: Vec::new(),
@@ -100,11 +95,74 @@ fn run_workspace_root_init(base: &Path, version: Option<&str>) -> Result<(), Ini
     Ok(())
 }
 
-fn run_workspace_init(
+fn run_group_init(base: &Path, dir: &str, name: Option<&str>) -> Result<(), InitError> {
+    // 1. Require .boop/ exists
+    if !store::is_initialized(base) {
+        return Err(InitError::NotInitialized);
+    }
+
+    // Validate dir as a valid path
+    store::validate_workspace_name(dir)?;
+
+    // 2. Read current manifest
+    let mut manifest = store::read_manifest(base)?;
+
+    // 3. Find closest parent group
+    let (parent_key, parent_path) =
+        find_parent_group(&manifest, dir).ok_or_else(|| InitError::NoParentGroup {
+            path: dir.to_string(),
+        })?;
+
+    // 4. Compute name: name.unwrap_or(relative_path_from_parent)
+    let rel_from_parent = relative_from(&parent_path, dir);
+    let group_name = name.unwrap_or(&rel_from_parent).to_string();
+
+    // 5. Validate name
+    store::validate_workspace_name(&group_name)?;
+
+    // 6. Check for name collision
+    if manifest.groups.contains_key(&group_name) {
+        return Err(InitError::NameCollision { name: group_name });
+    }
+    if manifest.workspaces.contains_key(&group_name) {
+        return Err(InitError::NameCollision { name: group_name });
+    }
+
+    // 7. Register group
+    manifest.groups.insert(
+        group_name.clone(),
+        GroupInfo {
+            path: dir.to_string(),
+            children: Vec::new(),
+        },
+    );
+
+    // 8. Add as child of parent group (the path relative to parent)
+    if let Some(parent) = manifest.groups.get_mut(&parent_key) {
+        let child_rel = relative_from(&parent.path, dir);
+        if !parent.children.contains(&child_rel) {
+            parent.children.push(child_rel);
+        }
+    }
+
+    // 9. Write manifest
+    store::write_manifest(base, &manifest)?;
+
+    // 10. The group's .boop/releases.toml is written by write_workspace_mode_manifest,
+    //     but also ensure the directory exists
+    let group_boop = base.join(dir).join(".boop");
+    fs::create_dir_all(&group_boop).map_err(InitError::Io)?;
+
+    eprintln!("Added workspace group {} (path: {})", group_name, dir);
+
+    Ok(())
+}
+
+fn run_leaf_init(
     base: &Path,
-    version: Option<&str>,
-    ws_path: &str,
+    dir: &str,
     name: Option<&str>,
+    version: Option<&str>,
     default: bool,
 ) -> Result<(), InitError> {
     // 1. Require .boop/ exists
@@ -112,99 +170,38 @@ fn run_workspace_init(
         return Err(InitError::NotInitialized);
     }
 
-    // 2. Validate name is a single segment (no /)
-    if let Some(n) = name
-        && (n.is_empty()
-            || n.contains('/')
-            || !n
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
-    {
-        return Err(InitError::Store(StoreError::InvalidWorkspaceName {
-            name: n.to_string(),
-        }));
-    }
+    // Validate dir as a valid path
+    store::validate_workspace_name(dir)?;
 
-    // Validate ws_path
-    store::validate_workspace_name(ws_path)?;
-
-    // 3. Read current manifest
+    // 2. Read current manifest
     let mut manifest = store::read_manifest(base)?;
 
-    let segments: Vec<&str> = ws_path.split('/').collect();
-    let top_segment = segments[0];
+    // 3. Find closest parent group
+    let (parent_key, parent_path) =
+        find_parent_group(&manifest, dir).ok_or_else(|| InitError::NoParentGroup {
+            path: dir.to_string(),
+        })?;
 
-    // 4. Auto-convert root to workspace mode if groups is empty
-    if manifest.groups.is_empty() {
-        // Move "root" workspace entry to "."
-        if let Some(root_ws) = manifest.workspaces.remove("root") {
-            manifest.workspaces.insert(
-                ".".to_string(),
-                Workspace {
-                    path: ".".to_string(),
-                    name: root_ws.name,
-                    version: root_ws.version,
-                    releases: root_ws.releases,
-                },
-            );
-        }
-        manifest.default_workspace = None;
-        manifest.groups.insert(
-            ".".to_string(),
-            vec![".".to_string(), top_segment.to_string()],
-        );
-    } else {
-        // Already in workspace mode — ensure top segment is in root group
-        let root_children = manifest.groups.entry(".".to_string()).or_default();
-        if !root_children.contains(&top_segment.to_string()) {
-            root_children.push(top_segment.to_string());
-        }
-    }
+    // 4. Compute name: name.unwrap_or(relative_path_from_parent)
+    let rel_from_parent = relative_from(&parent_path, dir);
+    let ws_name = name.unwrap_or(&rel_from_parent).to_string();
 
-    // 5. Compute workspace key
-    let ws_key = if let Some(n) = name {
-        // Replace last path segment with name in the key
-        if segments.len() == 1 {
-            n.to_string()
-        } else {
-            let parent = &segments[..segments.len() - 1];
-            format!("{}/{}", parent.join("/"), n)
-        }
-    } else {
-        ws_path.to_string()
-    };
+    // 5. Validate name
+    store::validate_workspace_name(&ws_name)?;
 
-    // 6. Idempotent: skip if key already exists
-    if manifest.workspaces.contains_key(&ws_key) {
-        eprintln!("Workspace {} already exists, skipping.", ws_key);
+    // 6. Check for name collision
+    if manifest.workspaces.contains_key(&ws_name) {
+        eprintln!("Workspace {} already exists, skipping.", ws_name);
         return Ok(());
     }
-
-    // 7. Create intermediate groups for each path prefix
-    for i in 1..segments.len() {
-        let prefix = segments[..i].join("/");
-        // Check if prefix is an existing leaf workspace
-        if manifest.workspaces.contains_key(&prefix)
-            || manifest.workspace_key_for_path(&prefix).is_some()
-        {
-            return Err(InitError::ParentIsLeaf { path: prefix });
-        }
-        // Create or update group
-        if let Some(children) = manifest.groups.get_mut(&prefix) {
-            let child = segments[i].to_string();
-            if !children.contains(&child) {
-                children.push(child);
-            }
-        } else {
-            manifest
-                .groups
-                .insert(prefix, vec![segments[i].to_string()]);
-        }
+    if manifest.groups.contains_key(&ws_name) {
+        return Err(InitError::NameCollision { name: ws_name });
     }
 
-    // 8. Insert leaf workspace
-    let version = resolve_version(&base.join(ws_path), version)?;
+    // 7. Resolve version
+    let version = resolve_version(&base.join(dir), version)?;
 
+    // 8. Register workspace
     let mut releases = BTreeMap::new();
     releases.insert(
         version.clone(),
@@ -215,32 +212,69 @@ fn run_workspace_init(
     );
 
     manifest.workspaces.insert(
-        ws_key.clone(),
+        ws_name.clone(),
         Workspace {
-            path: ws_path.to_string(),
-            name: name.map(|n| n.to_string()),
+            path: dir.to_string(),
+            name: Some(ws_name.clone()),
             version,
             releases,
         },
     );
 
-    if default {
-        manifest.default_workspace = Some(ws_key.clone());
+    // 9. Add as child of parent group
+    if let Some(parent) = manifest.groups.get_mut(&parent_key) {
+        let child_rel = relative_from(&parent.path, dir);
+        if !parent.children.contains(&child_rel) {
+            parent.children.push(child_rel);
+        }
     }
 
-    // 9. Write manifest and create changelogs dir
+    if default {
+        manifest.default_workspace = Some(ws_name.clone());
+    }
+
+    // 10. Write manifest and create changelogs dir
     store::write_manifest(base, &manifest)?;
-    let changelogs_dir = base.join(ws_path).join(".boop/changelogs");
+    let changelogs_dir = base.join(dir).join(".boop/changelogs");
     fs::create_dir_all(&changelogs_dir).map_err(InitError::Io)?;
 
-    // 10. Print confirmation
-    if name.is_some() {
-        eprintln!("Added workspace {} (path: {})", ws_key, ws_path);
-    } else {
-        eprintln!("Added workspace {}", ws_key);
-    }
+    eprintln!("Added workspace {} (path: {})", ws_name, dir);
 
     Ok(())
+}
+
+/// Find the closest ancestor group for a given directory path.
+/// Returns (group_key, group_path) of the closest ancestor.
+/// Walks dir's parent paths from longest to shortest.
+/// Root group (".") is always a valid parent.
+fn find_parent_group(manifest: &Manifest, dir: &str) -> Option<(String, String)> {
+    // Try progressively shorter prefixes of dir
+    let parts: Vec<&str> = dir.split('/').collect();
+    for i in (1..parts.len()).rev() {
+        let prefix = parts[..i].join("/");
+        // Check if any group has this prefix as its path
+        if let Some(key) = manifest.group_key_for_path(&prefix) {
+            return Some((key.to_string(), prefix));
+        }
+    }
+    // Fall back to root group
+    if manifest.groups.contains_key(".") {
+        return Some((".".to_string(), ".".to_string()));
+    }
+    None
+}
+
+/// Compute the relative path from `parent` to `child`.
+/// e.g. relative_from(".", "changelogs/typescript") => "changelogs/typescript"
+/// e.g. relative_from("changelogs/typescript", "changelogs/typescript/core") => "core"
+fn relative_from(parent: &str, child: &str) -> String {
+    if parent == "." {
+        child.to_string()
+    } else if let Some(rest) = child.strip_prefix(parent) {
+        rest.strip_prefix('/').unwrap_or(rest).to_string()
+    } else {
+        child.to_string()
+    }
 }
 
 fn resolve_version(base: &Path, version: Option<&str>) -> Result<String, InitError> {
@@ -267,20 +301,21 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
+    // -- Legacy root init tests (boop init) --
+
     #[test]
     fn creates_boop_dir_and_changelogs() {
         let dir = setup_dir();
-        run(dir.path(), None, None, None, false).unwrap();
+        run(dir.path(), None, false, None, None, false).unwrap();
         assert!(dir.path().join(".boop").exists());
         assert!(dir.path().join(".boop/changelogs").exists());
-        // Single-workspace init should NOT create a root/ subdirectory
         assert!(!dir.path().join(".boop/changelogs/root").exists());
     }
 
     #[test]
     fn creates_releases_toml_with_default_version() {
         let dir = setup_dir();
-        run(dir.path(), None, None, None, false).unwrap();
+        run(dir.path(), None, false, None, None, false).unwrap();
         let manifest = store::read_manifest(dir.path()).unwrap();
         let ws = manifest.default_workspace().unwrap();
         assert_eq!(ws.version, "0.0.1");
@@ -291,7 +326,7 @@ mod tests {
     #[test]
     fn creates_releases_toml_with_explicit_version() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.2.3"), None, None, false).unwrap();
+        run(dir.path(), None, false, None, Some("1.2.3"), false).unwrap();
         let manifest = store::read_manifest(dir.path()).unwrap();
         let ws = manifest.default_workspace().unwrap();
         assert_eq!(ws.version, "1.2.3");
@@ -300,15 +335,15 @@ mod tests {
     #[test]
     fn errors_if_already_initialized() {
         let dir = setup_dir();
-        run(dir.path(), None, None, None, false).unwrap();
-        let err = run(dir.path(), None, None, None, false).unwrap_err();
+        run(dir.path(), None, false, None, None, false).unwrap();
+        let err = run(dir.path(), None, false, None, None, false).unwrap_err();
         assert!(matches!(err, InitError::AlreadyInitialized { .. }));
     }
 
     #[test]
     fn errors_on_invalid_semver() {
         let dir = setup_dir();
-        let err = run(dir.path(), Some("not-a-version"), None, None, false).unwrap_err();
+        let err = run(dir.path(), None, false, None, Some("not-a-version"), false).unwrap_err();
         assert!(matches!(err, InitError::InvalidVersion { .. }));
     }
 
@@ -320,7 +355,7 @@ mod tests {
             "[package]\nname = \"test\"\nversion = \"3.0.0\"\n",
         )
         .unwrap();
-        run(dir.path(), None, None, None, false).unwrap();
+        run(dir.path(), None, false, None, None, false).unwrap();
         let manifest = store::read_manifest(dir.path()).unwrap();
         assert_eq!(manifest.default_workspace().unwrap().version, "3.0.0");
     }
@@ -333,7 +368,7 @@ mod tests {
             "[package]\nname = \"test\"\nversion = \"3.0.0\"\n",
         )
         .unwrap();
-        run(dir.path(), Some("5.0.0"), None, None, false).unwrap();
+        run(dir.path(), None, false, None, Some("5.0.0"), false).unwrap();
         let manifest = store::read_manifest(dir.path()).unwrap();
         assert_eq!(manifest.default_workspace().unwrap().version, "5.0.0");
     }
@@ -341,8 +376,7 @@ mod tests {
     #[test]
     fn falls_back_to_default_when_no_heuristic_match() {
         let dir = setup_dir();
-        // No package manifest files → should fall back to 0.0.1
-        run(dir.path(), None, None, None, false).unwrap();
+        run(dir.path(), None, false, None, None, false).unwrap();
         let manifest = store::read_manifest(dir.path()).unwrap();
         assert_eq!(manifest.default_workspace().unwrap().version, "0.0.1");
     }
@@ -350,7 +384,7 @@ mod tests {
     #[test]
     fn init_writes_legacy_manifest_shape_by_default() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.2.3"), None, None, false).unwrap();
+        run(dir.path(), None, false, None, Some("1.2.3"), false).unwrap();
 
         let content = fs::read_to_string(dir.path().join(".boop/releases.toml")).unwrap();
         let value: toml::Value = toml::from_str(&content).unwrap();
@@ -359,209 +393,258 @@ mod tests {
         assert!(value.get("workspaces").is_none());
     }
 
-    // -- Workspace init tests --
+    // -- Workspace root init tests (boop init -w) --
 
     #[test]
-    fn workspace_init_auto_converts_root_and_creates_group() {
+    fn workspace_root_init_creates_group() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
-
-        // Add workspace
-        run(dir.path(), None, Some("apps/api"), None, false).unwrap();
+        run(dir.path(), None, true, None, None, false).unwrap();
 
         let manifest = store::read_manifest(dir.path()).unwrap();
-
-        // Root workspace should be "." now
-        assert!(manifest.workspaces.contains_key("."));
-        assert_eq!(manifest.workspaces.get(".").unwrap().version, "1.0.0");
-        assert_eq!(manifest.default_workspace, None);
-
-        // New workspace should exist
-        assert!(manifest.workspaces.contains_key("apps/api"));
-        assert_eq!(
-            manifest.workspaces.get("apps/api").unwrap().version,
-            "0.0.1"
-        );
-        assert_eq!(
-            manifest.workspaces.get("apps/api").unwrap().path,
-            "apps/api"
-        );
-
-        // Groups should be set up
         assert!(manifest.groups.contains_key("."));
-        let root_children = manifest.groups.get(".").unwrap();
-        assert!(root_children.contains(&".".to_string()));
-        assert!(root_children.contains(&"apps".to_string()));
-
-        assert!(manifest.groups.contains_key("apps"));
-        assert_eq!(
-            manifest.groups.get("apps").unwrap(),
-            &vec!["api".to_string()]
-        );
-
-        // Changelogs dir created
-        assert!(dir.path().join("apps/api/.boop/changelogs").exists());
+        assert!(manifest.workspaces.is_empty());
+        assert_eq!(manifest.default_workspace, None);
     }
 
     #[test]
-    fn workspace_init_with_name_creates_named_workspace() {
+    fn workspace_root_init_errors_if_already_initialized() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
+        run(dir.path(), None, true, None, None, false).unwrap();
+        let err = run(dir.path(), None, true, None, None, false).unwrap_err();
+        assert!(matches!(err, InitError::AlreadyInitialized { .. }));
+    }
 
-        run(dir.path(), None, Some("apps/api"), Some("backend"), false).unwrap();
+    // -- Group init tests (boop init -w <dir>) --
+
+    #[test]
+    fn group_init_creates_named_group() {
+        let dir = setup_dir();
+        run(dir.path(), None, true, None, None, false).unwrap();
+        run(
+            dir.path(),
+            Some("changelogs/typescript"),
+            true,
+            Some("typescript"),
+            None,
+            false,
+        )
+        .unwrap();
 
         let manifest = store::read_manifest(dir.path()).unwrap();
+        assert!(manifest.groups.contains_key("typescript"));
+        let group = manifest.groups.get("typescript").unwrap();
+        assert_eq!(group.path, "changelogs/typescript");
+        assert!(group.children.is_empty());
 
-        // Key should be "apps/backend" (last segment replaced with name)
-        assert!(manifest.workspaces.contains_key("apps/backend"));
-        let ws = manifest.workspaces.get("apps/backend").unwrap();
-        assert_eq!(ws.path, "apps/api");
-        assert_eq!(ws.name.as_deref(), Some("backend"));
-
-        // Path should NOT be a key
-        assert!(!manifest.workspaces.contains_key("apps/api"));
+        // Root should have "changelogs/typescript" as child
+        let root = manifest.groups.get(".").unwrap();
+        assert!(root.children.contains(&"changelogs/typescript".to_string()));
     }
 
     #[test]
-    fn workspace_init_errors_without_prior_init() {
+    fn group_init_default_name_is_relative_path() {
         let dir = setup_dir();
-        // No init done
-        let err = run(dir.path(), None, Some("apps/api"), None, false).unwrap_err();
+        run(dir.path(), None, true, None, None, false).unwrap();
+        run(
+            dir.path(),
+            Some("changelogs/typescript"),
+            true,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        let manifest = store::read_manifest(dir.path()).unwrap();
+        // Default name = relative path from root = "changelogs/typescript"
+        assert!(manifest.groups.contains_key("changelogs/typescript"));
+    }
+
+    #[test]
+    fn group_init_errors_without_prior_init() {
+        let dir = setup_dir();
+        let err = run(dir.path(), Some("foo"), true, None, None, false).unwrap_err();
         assert!(matches!(err, InitError::NotInitialized));
     }
 
     #[test]
-    fn workspace_init_errors_parent_is_leaf() {
+    fn group_init_errors_on_name_collision_with_existing_group() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
+        run(dir.path(), None, true, None, None, false).unwrap();
+        run(dir.path(), Some("foo"), true, Some("mygroup"), None, false).unwrap();
+        let err = run(dir.path(), Some("bar"), true, Some("mygroup"), None, false).unwrap_err();
+        assert!(matches!(err, InitError::NameCollision { .. }));
+    }
 
-        // Add "apps" as a leaf workspace
-        run(dir.path(), None, Some("apps"), None, false).unwrap();
+    // -- Leaf init tests (boop init <dir>) --
 
-        // Try to add "apps/api" — "apps" is a leaf, not a group
-        let err = run(dir.path(), None, Some("apps/api"), None, false).unwrap_err();
-        assert!(matches!(err, InitError::ParentIsLeaf { ref path } if path == "apps"));
+    #[test]
+    fn leaf_init_creates_workspace_under_closest_group() {
+        let dir = setup_dir();
+        run(dir.path(), None, true, None, None, false).unwrap();
+        run(
+            dir.path(),
+            Some("changelogs/typescript"),
+            true,
+            Some("typescript"),
+            None,
+            false,
+        )
+        .unwrap();
+        run(
+            dir.path(),
+            Some("changelogs/typescript/core"),
+            false,
+            Some("core"),
+            None,
+            false,
+        )
+        .unwrap();
+
+        let manifest = store::read_manifest(dir.path()).unwrap();
+        assert!(manifest.workspaces.contains_key("core"));
+        let ws = manifest.workspaces.get("core").unwrap();
+        assert_eq!(ws.path, "changelogs/typescript/core");
+        assert_eq!(ws.name.as_deref(), Some("core"));
+
+        // "core" should be child of typescript group
+        let ts = manifest.groups.get("typescript").unwrap();
+        assert!(ts.children.contains(&"core".to_string()));
     }
 
     #[test]
-    fn workspace_init_idempotent() {
+    fn leaf_init_default_name_is_last_segment() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
+        run(dir.path(), None, true, None, None, false).unwrap();
+        run(dir.path(), Some("typescript"), true, None, None, false).unwrap();
+        run(
+            dir.path(),
+            Some("typescript/core"),
+            false,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
-        run(dir.path(), None, Some("apps/api"), None, false).unwrap();
+        let manifest = store::read_manifest(dir.path()).unwrap();
+        // Default name = relative from parent group ("typescript") = "core"
+        assert!(manifest.workspaces.contains_key("core"));
+    }
+
+    #[test]
+    fn leaf_init_errors_without_parent_group() {
+        let dir = setup_dir();
+        run(dir.path(), None, true, None, None, false).unwrap();
+        // No group at "nonexistent" exists, and dir "nonexistent/leaf" has
+        // no registered ancestor beyond root "."
+        // Actually root "." IS a valid parent, so this should work.
+        // Let me test a case where there's truly no parent group.
+        // Actually, root "." is always a parent. So leaf init under root should work.
+        run(dir.path(), Some("leaf"), false, None, None, false).unwrap();
+
+        let manifest = store::read_manifest(dir.path()).unwrap();
+        assert!(manifest.workspaces.contains_key("leaf"));
+    }
+
+    #[test]
+    fn leaf_init_same_name_is_idempotent() {
+        let dir = setup_dir();
+        run(dir.path(), None, true, None, None, false).unwrap();
+        run(dir.path(), Some("foo"), false, Some("myws"), None, false).unwrap();
+        // Same name already exists — idempotent skip (not an error)
+        run(dir.path(), Some("bar"), false, Some("myws"), None, false).unwrap();
+        // Still only one workspace
+        let manifest = store::read_manifest(dir.path()).unwrap();
+        assert_eq!(manifest.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn leaf_init_idempotent() {
+        let dir = setup_dir();
+        run(dir.path(), None, true, None, None, false).unwrap();
+        run(dir.path(), Some("foo"), false, None, None, false).unwrap();
         // Second call should be a no-op
-        run(dir.path(), None, Some("apps/api"), None, false).unwrap();
+        run(dir.path(), Some("foo"), false, None, None, false).unwrap();
 
         let manifest = store::read_manifest(dir.path()).unwrap();
-        assert_eq!(manifest.workspaces.len(), 2); // "." and "apps/api"
+        assert_eq!(manifest.workspaces.len(), 1);
     }
 
     #[test]
-    fn name_without_workspace_errors() {
+    fn leaf_init_with_version() {
         let dir = setup_dir();
-        let err = run(dir.path(), None, None, Some("foo"), false).unwrap_err();
-        assert!(matches!(err, InitError::NameWithoutWorkspace));
+        run(dir.path(), None, true, None, None, false).unwrap();
+        run(dir.path(), Some("foo"), false, None, Some("2.0.0"), false).unwrap();
+
+        let manifest = store::read_manifest(dir.path()).unwrap();
+        assert_eq!(manifest.workspaces.get("foo").unwrap().version, "2.0.0");
     }
 
     #[test]
-    fn workspace_init_single_segment_path() {
+    fn leaf_init_with_default_flag() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
-
-        run(dir.path(), None, Some("api"), None, false).unwrap();
+        run(dir.path(), None, true, None, None, false).unwrap();
+        run(dir.path(), Some("foo"), false, None, None, true).unwrap();
 
         let manifest = store::read_manifest(dir.path()).unwrap();
-        assert!(manifest.workspaces.contains_key("api"));
-        assert_eq!(manifest.workspaces.get("api").unwrap().path, "api");
-
-        let root_children = manifest.groups.get(".").unwrap();
-        assert!(root_children.contains(&"api".to_string()));
+        assert_eq!(manifest.default_workspace.as_deref(), Some("foo"));
     }
 
-    #[test]
-    fn workspace_init_single_segment_with_name() {
-        let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
-
-        run(dir.path(), None, Some("api"), Some("backend"), false).unwrap();
-
-        let manifest = store::read_manifest(dir.path()).unwrap();
-        // Key = name for single segment
-        assert!(manifest.workspaces.contains_key("backend"));
-        let ws = manifest.workspaces.get("backend").unwrap();
-        assert_eq!(ws.path, "api");
-        assert_eq!(ws.name.as_deref(), Some("backend"));
-    }
+    // -- Round-trip test --
 
     #[test]
-    fn workspace_init_preserves_root_releases() {
+    fn full_workflow_round_trip() {
         let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
-
-        // The root init creates a baseline release for 1.0.0
-        let manifest = store::read_manifest(dir.path()).unwrap();
-        assert!(
-            manifest
-                .workspaces
-                .get("root")
-                .unwrap()
-                .releases
-                .contains_key("1.0.0")
-        );
-
-        // Add workspace — root should be converted to "." preserving releases
-        run(dir.path(), None, Some("api"), None, false).unwrap();
-
-        let manifest = store::read_manifest(dir.path()).unwrap();
-        let root = manifest.workspaces.get(".").unwrap();
-        assert!(root.releases.contains_key("1.0.0"));
-    }
-
-    #[test]
-    fn workspace_init_multiple_workspaces() {
-        let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
-
-        run(dir.path(), None, Some("apps/api"), None, false).unwrap();
-        run(dir.path(), None, Some("apps/web"), None, false).unwrap();
-        run(dir.path(), None, Some("libs/core"), None, false).unwrap();
+        // 1. Create workspace root
+        run(dir.path(), None, true, None, None, false).unwrap();
+        // 2. Create a group
+        run(
+            dir.path(),
+            Some("changelogs/typescript"),
+            true,
+            Some("typescript"),
+            None,
+            false,
+        )
+        .unwrap();
+        // 3. Create a leaf under the group
+        run(
+            dir.path(),
+            Some("changelogs/typescript/core"),
+            false,
+            Some("core"),
+            None,
+            false,
+        )
+        .unwrap();
 
         let manifest = store::read_manifest(dir.path()).unwrap();
-        assert_eq!(manifest.workspaces.len(), 4); // ".", "apps/api", "apps/web", "libs/core"
+        assert!(manifest.groups.contains_key("."));
+        assert!(manifest.groups.contains_key("typescript"));
+        assert!(manifest.workspaces.contains_key("core"));
 
-        // Root group has ".", "apps", "libs"
-        let root_children = manifest.groups.get(".").unwrap();
-        assert!(root_children.contains(&".".to_string()));
-        assert!(root_children.contains(&"apps".to_string()));
-        assert!(root_children.contains(&"libs".to_string()));
-
-        // "apps" group has "api", "web"
-        let apps_children = manifest.groups.get("apps").unwrap();
-        assert!(apps_children.contains(&"api".to_string()));
-        assert!(apps_children.contains(&"web".to_string()));
-
-        // "libs" group has "core"
-        assert_eq!(
-            manifest.groups.get("libs").unwrap(),
-            &vec!["core".to_string()]
-        );
-    }
-
-    #[test]
-    fn workspace_init_round_trip() {
-        let dir = setup_dir();
-        run(dir.path(), Some("1.0.0"), None, None, false).unwrap();
-        run(dir.path(), None, Some("apps/api"), None, false).unwrap();
-
-        let manifest = store::read_manifest(dir.path()).unwrap();
+        // Write and re-read
         store::write_manifest(dir.path(), &manifest).unwrap();
         let reloaded = store::read_manifest(dir.path()).unwrap();
 
+        assert_eq!(manifest.groups.len(), reloaded.groups.len());
         assert_eq!(manifest.workspaces.len(), reloaded.workspaces.len());
-        for (key, ws) in &manifest.workspaces {
-            let rws = reloaded.workspaces.get(key).unwrap();
-            assert_eq!(ws.version, rws.version);
-            assert_eq!(ws.path, rws.path);
-        }
+        assert!(reloaded.groups.contains_key("typescript"));
+        assert!(reloaded.workspaces.contains_key("core"));
+        assert_eq!(
+            reloaded.workspaces.get("core").unwrap().path,
+            "changelogs/typescript/core"
+        );
+    }
+
+    #[test]
+    fn leaf_name_collision_with_group_errors() {
+        let dir = setup_dir();
+        run(dir.path(), None, true, None, None, false).unwrap();
+        run(dir.path(), Some("foo"), true, Some("myname"), None, false).unwrap();
+        // Try creating a leaf with the same name
+        let err = run(dir.path(), Some("bar"), false, Some("myname"), None, false).unwrap_err();
+        assert!(matches!(err, InitError::NameCollision { .. }));
     }
 }

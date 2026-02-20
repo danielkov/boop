@@ -1,31 +1,39 @@
-## Add workspace creation to `boop init`
+## Rework workspace init with named groups and explicit creation
 
-Users can now incrementally build workspace trees without manually creating TOML files and directory structures.
+The `boop init` CLI now supports fully explicit workspace tree construction with named groups.
 
-### `boop init -w <path>`
+### New CLI
 
-Adds a workspace at the given filesystem path to an already-initialized repo. On first use the root manifest is automatically converted to workspace mode — the existing `root` workspace becomes `.` and groups are created for every intermediate directory.
-
-```sh
-boop init                  # initialize root
-boop init -w apps/api      # add apps/api workspace
-boop init -w apps/web      # add apps/web workspace
-boop init -w libs/core     # add libs/core workspace
+```
+boop init [dir] [-w] [-n <name>] [--version <version>] [--default]
 ```
 
-Workspace creation is **idempotent**: running the same `init -w` twice is a silent no-op.
+- `boop init` — single leaf at `.` (legacy, unchanged)
+- `boop init -w` — workspace root group at `.`
+- `boop init -w <dir>` — create a named group at `<dir>`
+- `boop init <dir>` — create a leaf workspace under the closest parent group
 
-### `--name` flag (named workspaces)
+### Named groups and workspaces
 
-Decouples the workspace key from the filesystem path. When `--name` is set the last path segment in the key is replaced with the given name:
+The `-n`/`--name` flag sets a custom name (used as the workspace/group key) independent of the filesystem path. Names default to the relative path from the closest parent group.
 
 ```sh
-boop init -w packages/ts-sdk --name typescript
-# key = packages/typescript, path = packages/ts-sdk
+boop init -w
+boop init -w changelogs/typescript -n typescript
+boop init changelogs/typescript/core -n core
+boop major -w core "breaking change"
 ```
 
-This lets multiple workspaces share a directory prefix while keeping human-friendly keys.
+### Data model: `GroupInfo`
 
-### Manifest-aware changelog resolution
+Groups are now stored as `GroupInfo { path, children }` instead of plain `Vec<String>`, decoupling the group name (map key) from the filesystem path. Group manifests write a `name` field to disk so names round-trip correctly.
 
-All commands (`add`, `apply`, `status`, `changelog`) now resolve changelog directories through the manifest instead of inferring layout from the workspace key. This ensures named workspaces whose key differs from their path read and write entries in the correct location.
+### Longest-prefix workspace resolution
+
+`-w` selectors now use longest-prefix matching: `boop major -w typescript/core` first tries exact match, then finds group `typescript` and resolves `core` as a child. This works regardless of whether names contain `/`.
+
+### Other changes
+
+- Empty workspace groups are now allowed (a just-created group with no children)
+- Name collision detection prevents duplicate group/workspace names
+- All commands (`add`, `apply`, `status`, `changelog`, `version`) work with the new named workspace model
