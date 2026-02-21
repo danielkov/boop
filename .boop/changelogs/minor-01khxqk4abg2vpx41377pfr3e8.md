@@ -15,13 +15,13 @@ boop init [dir] [-w] [-n <name>] [--version <version>] [--default]
 
 ### Named groups and workspaces
 
-The `-n`/`--name` flag sets a custom name (used as the workspace/group key) independent of the filesystem path. Names default to the relative path from the closest parent group.
+The `-n`/`--name` flag sets a custom name independent of the filesystem path. Names default to the relative path from the closest parent group, and workspace keys are fully qualified (parent group key + name).
 
 ```sh
 boop init -w
 boop init -w changelogs/typescript -n typescript
-boop init changelogs/typescript/core -n core
-boop major -w core "breaking change"
+boop init changelogs/typescript/core
+boop major -w typescript/core "breaking change"
 ```
 
 ### Data model: `GroupInfo`
