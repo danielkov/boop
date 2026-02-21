@@ -161,6 +161,8 @@ pub enum VersionError {
     InvalidVersion { input: String },
     #[error("unknown workspace: {name}")]
     UnknownWorkspace { name: String },
+    #[error("failed to serialize version JSON: {source}")]
+    Serialize { source: serde_json::Error },
     #[error(transparent)]
     Store(#[from] StoreError),
 }

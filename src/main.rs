@@ -119,6 +119,9 @@ enum Commands {
         /// Print all workspaces from last release group as JSON
         #[arg(long)]
         all_json: bool,
+        /// Only include workspaces that changed in the last release (requires --all-json)
+        #[arg(long, requires = "all_json")]
+        omit_unchanged: bool,
     },
 }
 
@@ -233,9 +236,10 @@ fn run(command: Commands) -> Result<(), boop::errors::BoopError> {
         Commands::Version {
             workspace,
             all_json,
+            omit_unchanged,
         } => {
             if all_json {
-                boop::commands::version::run_all_json(&base)?;
+                boop::commands::version::run_all_json(&base, omit_unchanged)?;
             } else {
                 boop::commands::version::run(&base, workspace.as_deref())?;
             }
