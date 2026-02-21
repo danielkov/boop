@@ -105,6 +105,10 @@ enum Commands {
         /// Scope to a single workspace
         #[arg(short = 'w', long = "workspace")]
         workspace: Option<String>,
+
+        /// Skip workspaces with no pending changelog entries
+        #[arg(long)]
+        omit_empty: bool,
     },
 
     /// Print the current version
@@ -220,8 +224,11 @@ fn run(command: Commands) -> Result<(), boop::errors::BoopError> {
         Commands::Revert => {
             boop::commands::revert::run(&base)?;
         }
-        Commands::Status { workspace } => {
-            boop::commands::status::run(&base, workspace.as_deref())?;
+        Commands::Status {
+            workspace,
+            omit_empty,
+        } => {
+            boop::commands::status::run(&base, workspace.as_deref(), omit_empty)?;
         }
         Commands::Version {
             workspace,

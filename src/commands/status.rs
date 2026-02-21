@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::errors::{BoopError, StatusError};
 use crate::store;
 
-pub fn run(base: &Path, workspace: Option<&str>) -> Result<(), BoopError> {
+pub fn run(base: &Path, workspace: Option<&str>, omit_empty: bool) -> Result<(), BoopError> {
     store::ensure_initialized(base)?;
 
     let manifest = store::read_manifest(base)?;
@@ -28,14 +28,20 @@ pub fn run(base: &Path, workspace: Option<&str>) -> Result<(), BoopError> {
         None => manifest.workspaces.keys().cloned().collect(),
     };
 
-    for (i, ws_name) in workspace_names.iter().enumerate() {
-        if i > 0 {
-            println!();
-        }
-
+    let mut printed = 0usize;
+    for ws_name in &workspace_names {
         let ws = &manifest.workspaces[ws_name.as_str()];
         let all_entries = store::list_entry_filenames_for_workspace(base, &manifest, ws_name)?;
         let pending = store::pending_entries(&manifest, ws_name, &all_entries);
+
+        if omit_empty && pending.is_empty() {
+            continue;
+        }
+
+        if printed > 0 {
+            println!();
+        }
+        printed += 1;
 
         println!("{} ({})", ws_name, ws.version);
 
@@ -113,7 +119,7 @@ version = "0.8.3"
         setup_workspace_project(dir.path());
 
         // Should not error
-        let result = run(dir.path(), None);
+        let result = run(dir.path(), None, false);
         assert!(result.is_ok());
     }
 
@@ -122,7 +128,7 @@ version = "0.8.3"
         let dir = tempfile::tempdir().unwrap();
         setup_workspace_project(dir.path());
 
-        let result = run(dir.path(), Some("api"));
+        let result = run(dir.path(), Some("api"), false);
         assert!(result.is_ok());
     }
 
@@ -131,7 +137,7 @@ version = "0.8.3"
         let dir = tempfile::tempdir().unwrap();
         setup_workspace_project(dir.path());
 
-        let result = run(dir.path(), Some("nonexistent"));
+        let result = run(dir.path(), Some("nonexistent"), false);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("unknown workspace: nonexistent"));
@@ -143,7 +149,18 @@ version = "0.8.3"
         setup_workspace_project(dir.path());
 
         // root has no changelog entries at all, so no pending
-        let result = run(dir.path(), Some("root"));
+        let result = run(dir.path(), Some("root"), false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn status_omit_empty_skips_no_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_workspace_project(dir.path());
+
+        // root has no pending entries; with omit_empty it should still succeed
+        // but skip root in the output
+        let result = run(dir.path(), None, true);
         assert!(result.is_ok());
     }
 
@@ -172,7 +189,7 @@ version = "1.0.0"
         fs::write(cl.join("minor-01abc.md"), "## New feature").unwrap();
 
         // Status should see the flat entry without requiring root/
-        let result = run(dir.path(), None);
+        let result = run(dir.path(), None, false);
         assert!(result.is_ok());
     }
 }

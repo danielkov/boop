@@ -435,10 +435,12 @@ pub fn ensure_changelogs_dir_scoped(
 
 /// Recursively load workspace entries from nested manifests.
 /// `parent_path` is the fully qualified filesystem path of the parent ("." for root).
+/// `parent_group_key` is the resolved key of the parent group (e.g. "." or "frontend").
 /// `children` are the relative child paths from the parent's `workspaces` array.
 fn load_workspace_tree(
     base: &Path,
     parent_path: &str,
+    parent_group_key: &str,
     children: &[String],
     workspaces: &mut BTreeMap<String, Workspace>,
     groups: &mut BTreeMap<String, GroupInfo>,
@@ -473,19 +475,33 @@ fn load_workspace_tree(
                 validate_workspace_name(sub_child)?;
             }
             // Use name field as group key if it's a valid workspace name,
-            // otherwise fall back to full_path for backward compatibility
+            // otherwise fall back to full_path for backward compatibility.
+            // Qualify with parent group key to build fully-qualified name.
             let group_key = match &sub_root.name {
-                Some(n) if validate_workspace_name(n).is_ok() => n.clone(),
+                Some(n) if validate_workspace_name(n).is_ok() => {
+                    if parent_group_key == "." {
+                        n.clone()
+                    } else {
+                        format!("{parent_group_key}/{n}")
+                    }
+                }
                 _ => full_path.clone(),
             };
             groups.insert(
-                group_key,
+                group_key.clone(),
                 GroupInfo {
                     path: full_path.clone(),
                     children: sub_root.workspaces.clone(),
                 },
             );
-            load_workspace_tree(base, &full_path, &sub_root.workspaces, workspaces, groups)?;
+            load_workspace_tree(
+                base,
+                &full_path,
+                &group_key,
+                &sub_root.workspaces,
+                workspaces,
+                groups,
+            )?;
         } else {
             // It's a leaf workspace
             let ws_legacy: LegacyManifest =
@@ -494,9 +510,16 @@ fn load_workspace_tree(
                     source,
                 })?;
             // Use name field as workspace key if it's a valid workspace name,
-            // otherwise fall back to full_path for backward compatibility
+            // otherwise fall back to full_path for backward compatibility.
+            // Qualify with parent group key to build fully-qualified name.
             let key = match &ws_legacy.name {
-                Some(n) if validate_workspace_name(n).is_ok() => n.clone(),
+                Some(n) if validate_workspace_name(n).is_ok() => {
+                    if parent_group_key == "." {
+                        n.clone()
+                    } else {
+                        format!("{parent_group_key}/{n}")
+                    }
+                }
                 _ => full_path.clone(),
             };
             workspaces.insert(
@@ -567,7 +590,7 @@ pub fn read_manifest(base: &Path) -> Result<Manifest, StoreError> {
             validate_workspace_name(ws_name)?;
         }
 
-        load_workspace_tree(base, ".", &non_root, &mut workspaces, &mut groups)?;
+        load_workspace_tree(base, ".", ".", &non_root, &mut workspaces, &mut groups)?;
 
         // Track root-level group
         groups.insert(

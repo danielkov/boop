@@ -189,19 +189,26 @@ fn run_leaf_init(
     // 5. Validate name
     store::validate_workspace_name(&ws_name)?;
 
-    // 6. Check for name collision
-    if manifest.workspaces.contains_key(&ws_name) {
-        eprintln!("Workspace {} already exists, skipping.", ws_name);
+    // 6. Build fully-qualified key (parent_group/name) for the in-memory map
+    let ws_key = if parent_key == "." {
+        ws_name.clone()
+    } else {
+        format!("{parent_key}/{ws_name}")
+    };
+
+    // 7. Check for name collision
+    if manifest.workspaces.contains_key(&ws_key) {
+        eprintln!("Workspace {} already exists, skipping.", ws_key);
         return Ok(());
     }
-    if manifest.groups.contains_key(&ws_name) {
-        return Err(InitError::NameCollision { name: ws_name });
+    if manifest.groups.contains_key(&ws_key) {
+        return Err(InitError::NameCollision { name: ws_key });
     }
 
-    // 7. Resolve version
+    // 8. Resolve version
     let version = resolve_version(&base.join(dir), version)?;
 
-    // 8. Register workspace
+    // 9. Register workspace (key = FQN, name = short name)
     let mut releases = BTreeMap::new();
     releases.insert(
         version.clone(),
@@ -212,16 +219,16 @@ fn run_leaf_init(
     );
 
     manifest.workspaces.insert(
-        ws_name.clone(),
+        ws_key.clone(),
         Workspace {
             path: dir.to_string(),
-            name: Some(ws_name.clone()),
+            name: Some(ws_name),
             version,
             releases,
         },
     );
 
-    // 9. Add as child of parent group
+    // 10. Add as child of parent group
     if let Some(parent) = manifest.groups.get_mut(&parent_key) {
         let child_rel = relative_from(&parent.path, dir);
         if !parent.children.contains(&child_rel) {
@@ -230,15 +237,15 @@ fn run_leaf_init(
     }
 
     if default {
-        manifest.default_workspace = Some(ws_name.clone());
+        manifest.default_workspace = Some(ws_key.clone());
     }
 
-    // 10. Write manifest and create changelogs dir
+    // 11. Write manifest and create changelogs dir
     store::write_manifest(base, &manifest)?;
     let changelogs_dir = base.join(dir).join(".boop/changelogs");
     fs::create_dir_all(&changelogs_dir).map_err(InitError::Io)?;
 
-    eprintln!("Added workspace {} (path: {})", ws_name, dir);
+    eprintln!("Added workspace {} (path: {})", ws_key, dir);
 
     Ok(())
 }
@@ -502,8 +509,8 @@ mod tests {
         .unwrap();
 
         let manifest = store::read_manifest(dir.path()).unwrap();
-        assert!(manifest.workspaces.contains_key("core"));
-        let ws = manifest.workspaces.get("core").unwrap();
+        assert!(manifest.workspaces.contains_key("typescript/core"));
+        let ws = manifest.workspaces.get("typescript/core").unwrap();
         assert_eq!(ws.path, "changelogs/typescript/core");
         assert_eq!(ws.name.as_deref(), Some("core"));
 
@@ -529,7 +536,8 @@ mod tests {
 
         let manifest = store::read_manifest(dir.path()).unwrap();
         // Default name = relative from parent group ("typescript") = "core"
-        assert!(manifest.workspaces.contains_key("core"));
+        // FQN key = parent group key / short name = "typescript/core"
+        assert!(manifest.workspaces.contains_key("typescript/core"));
     }
 
     #[test]
@@ -622,7 +630,7 @@ mod tests {
         let manifest = store::read_manifest(dir.path()).unwrap();
         assert!(manifest.groups.contains_key("."));
         assert!(manifest.groups.contains_key("typescript"));
-        assert!(manifest.workspaces.contains_key("core"));
+        assert!(manifest.workspaces.contains_key("typescript/core"));
 
         // Write and re-read
         store::write_manifest(dir.path(), &manifest).unwrap();
@@ -631,9 +639,9 @@ mod tests {
         assert_eq!(manifest.groups.len(), reloaded.groups.len());
         assert_eq!(manifest.workspaces.len(), reloaded.workspaces.len());
         assert!(reloaded.groups.contains_key("typescript"));
-        assert!(reloaded.workspaces.contains_key("core"));
+        assert!(reloaded.workspaces.contains_key("typescript/core"));
         assert_eq!(
-            reloaded.workspaces.get("core").unwrap().path,
+            reloaded.workspaces.get("typescript/core").unwrap().path,
             "changelogs/typescript/core"
         );
     }
@@ -646,5 +654,66 @@ mod tests {
         // Try creating a leaf with the same name
         let err = run(dir.path(), Some("bar"), false, Some("myname"), None, false).unwrap_err();
         assert!(matches!(err, InitError::NameCollision { .. }));
+    }
+
+    #[test]
+    fn same_name_leaves_in_different_groups_do_not_conflict() {
+        let dir = setup_dir();
+        // 1. Workspace root
+        run(dir.path(), None, true, None, None, false).unwrap();
+        // 2. Two separate groups
+        run(
+            dir.path(),
+            Some("packages/frontend"),
+            true,
+            Some("frontend"),
+            None,
+            false,
+        )
+        .unwrap();
+        run(
+            dir.path(),
+            Some("packages/backend"),
+            true,
+            Some("backend"),
+            None,
+            false,
+        )
+        .unwrap();
+        // 3. Create leaf "utils" under each group (no explicit name → derives "utils")
+        fs::create_dir_all(dir.path().join("packages/frontend/utils")).unwrap();
+        fs::create_dir_all(dir.path().join("packages/backend/utils")).unwrap();
+
+        run(
+            dir.path(),
+            Some("packages/frontend/utils"),
+            false,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        run(
+            dir.path(),
+            Some("packages/backend/utils"),
+            false,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        let manifest = store::read_manifest(dir.path()).unwrap();
+        // Both leaves should exist — they are in different groups and not ambiguous
+        let frontend_utils = manifest
+            .workspaces
+            .values()
+            .find(|ws| ws.path == "packages/frontend/utils");
+        let backend_utils = manifest
+            .workspaces
+            .values()
+            .find(|ws| ws.path == "packages/backend/utils");
+        assert!(frontend_utils.is_some(), "frontend/utils leaf should exist");
+        assert!(backend_utils.is_some(), "backend/utils leaf should exist");
     }
 }
