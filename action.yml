@@ -59,7 +59,7 @@ runs:
       id: apply
       shell: bash
       run: |
-        if boop apply --all; then
+        if boop apply --all 2>/dev/null || boop apply 2>/dev/null; then
           echo "released=true" >> "$GITHUB_OUTPUT"
         else
           echo "released=false" >> "$GITHUB_OUTPUT"
