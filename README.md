@@ -54,6 +54,9 @@ boop changelog 1.0.0...2.0.0   # range
 boop apply --pre beta           # 2.1.0-beta.0
 boop apply --pre beta           # 2.1.0-beta.1
 boop apply                      # 2.1.0
+
+# merge pending entries into current version (rewrites history)
+boop apply --current
 ```
 
 ## GitHub Action

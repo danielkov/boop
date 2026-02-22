@@ -11,27 +11,56 @@ struct Cli {
 enum Commands {
     /// Initialize .boop/ directory
     Init {
-        /// Initial version (overrides auto-detection)
+        /// Directory to initialize (relative to cwd)
+        dir: Option<String>,
+        /// Create a workspace group instead of a leaf
+        #[arg(short = 'w', long = "workspace")]
+        workspace: bool,
+        /// Custom name for the workspace or group
+        #[arg(short = 'n', long = "name")]
+        name: Option<String>,
+        /// Initial version (overrides auto-detection, leaves only)
         #[arg(long)]
         version: Option<String>,
+        /// Set as default workspace
+        #[arg(long)]
+        default: bool,
     },
 
     /// Create a major change entry
     Major {
         /// Changelog message (markdown)
         message: String,
+        /// Target workspace(s), comma-separated
+        #[arg(short = 'w', long = "workspace")]
+        workspace: Option<String>,
+        /// Target all workspaces (or all within -w groups)
+        #[arg(long)]
+        all: bool,
     },
 
     /// Create a minor change entry
     Minor {
         /// Changelog message (markdown)
         message: String,
+        /// Target workspace(s), comma-separated
+        #[arg(short = 'w', long = "workspace")]
+        workspace: Option<String>,
+        /// Target all workspaces (or all within -w groups)
+        #[arg(long)]
+        all: bool,
     },
 
     /// Create a patch change entry
     Patch {
         /// Changelog message (markdown)
         message: String,
+        /// Target workspace(s), comma-separated
+        #[arg(short = 'w', long = "workspace")]
+        workspace: Option<String>,
+        /// Target all workspaces (or all within -w groups)
+        #[arg(long)]
+        all: bool,
     },
 
     /// Resolve next version and record release
@@ -39,19 +68,61 @@ enum Commands {
         /// Pre-release tag (use without value for "pre", or specify e.g. "beta")
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         pre: Option<String>,
+        /// Merge pending changelog entries into the current version (history rewrite)
+        #[arg(long)]
+        current: bool,
+        /// Target workspace(s), comma-separated
+        #[arg(short = 'w', long = "workspace")]
+        workspace: Option<String>,
+        /// Apply all workspaces with pending entries
+        #[arg(long)]
+        all: bool,
+        /// Print planned changes without writing
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Query changelog history
     Changelog {
         /// Version or range (e.g. "1.2.3" or "1.0.0...2.0.0")
         range: Option<String>,
+        /// Workspace name(s), comma-separated
+        #[arg(short = 'w', long = "workspace")]
+        workspace: Option<String>,
+        /// Filter by release group ID
+        #[arg(long)]
+        group: Option<String>,
+        /// Print all workspaces from last release group as JSON
+        #[arg(long)]
+        all_json: bool,
     },
 
+    /// Revert the most recent apply
+    Revert,
+
     /// Show current version and pending entries
-    Status,
+    Status {
+        /// Scope to a single workspace
+        #[arg(short = 'w', long = "workspace")]
+        workspace: Option<String>,
+
+        /// Skip workspaces with no pending changelog entries
+        #[arg(long)]
+        omit_empty: bool,
+    },
 
     /// Print the current version
-    Version,
+    Version {
+        /// Workspace name
+        #[arg(short = 'w', long = "workspace")]
+        workspace: Option<String>,
+        /// Print all workspaces from last release group as JSON
+        #[arg(long)]
+        all_json: bool,
+        /// Only include workspaces that changed in the last release (requires --all-json)
+        #[arg(long, requires = "all_json")]
+        omit_unchanged: bool,
+    },
 }
 
 #[allow(clippy::result_large_err)]
@@ -62,32 +133,116 @@ fn run(command: Commands) -> Result<(), boop::errors::BoopError> {
     })?;
 
     match command {
-        Commands::Init { version } => {
-            boop::commands::init::run(&base, version.as_deref())?;
+        Commands::Init {
+            dir,
+            workspace,
+            name,
+            version,
+            default,
+        } => {
+            boop::commands::init::run(
+                &base,
+                dir.as_deref(),
+                workspace,
+                name.as_deref(),
+                version.as_deref(),
+                default,
+            )?;
         }
-        Commands::Major { message } => {
-            boop::commands::add::run(&base, boop::version::BumpKind::Major, &message)?;
+        Commands::Major {
+            message,
+            workspace,
+            all,
+        } => {
+            boop::commands::add::run(
+                &base,
+                boop::version::BumpKind::Major,
+                &message,
+                workspace.as_deref(),
+                all,
+            )?;
         }
-        Commands::Minor { message } => {
-            boop::commands::add::run(&base, boop::version::BumpKind::Minor, &message)?;
+        Commands::Minor {
+            message,
+            workspace,
+            all,
+        } => {
+            boop::commands::add::run(
+                &base,
+                boop::version::BumpKind::Minor,
+                &message,
+                workspace.as_deref(),
+                all,
+            )?;
         }
-        Commands::Patch { message } => {
-            boop::commands::add::run(&base, boop::version::BumpKind::Patch, &message)?;
+        Commands::Patch {
+            message,
+            workspace,
+            all,
+        } => {
+            boop::commands::add::run(
+                &base,
+                boop::version::BumpKind::Patch,
+                &message,
+                workspace.as_deref(),
+                all,
+            )?;
         }
-        Commands::Apply { pre } => {
+        Commands::Apply {
+            pre,
+            current,
+            workspace,
+            all,
+            dry_run,
+        } => {
             let pre_tag = pre
                 .as_ref()
                 .map(|s| if s.is_empty() { None } else { Some(s.as_str()) });
-            boop::commands::apply::run(&base, pre_tag)?;
+            boop::commands::apply::run(
+                &base,
+                pre_tag,
+                current,
+                workspace.as_deref(),
+                all,
+                dry_run,
+            )?;
         }
-        Commands::Changelog { range } => {
-            boop::commands::changelog::run(&base, range.as_deref())?;
+        Commands::Changelog {
+            range,
+            workspace,
+            group,
+            all_json,
+        } => {
+            if all_json {
+                boop::commands::changelog::run_all_json(&base)?;
+            } else {
+                boop::commands::changelog::run(
+                    &base,
+                    range.as_deref(),
+                    workspace.as_deref(),
+                    group.as_deref(),
+                )?;
+            }
         }
-        Commands::Status => {
-            boop::commands::status::run(&base)?;
+        Commands::Revert => {
+            boop::commands::revert::run(&base)?;
         }
-        Commands::Version => {
-            boop::commands::version::run(&base)?;
+        Commands::Status {
+            workspace,
+            omit_empty,
+        } => {
+            boop::commands::status::run(&base, workspace.as_deref(), omit_empty)?;
+        }
+        Commands::Version {
+            workspace,
+            all_json,
+            omit_unchanged,
+        } => {
+            if all_json {
+                boop::commands::version::run_all_json(&base, omit_unchanged)?;
+            } else {
+                boop::commands::version::run(&base, workspace.as_deref())?;
+            }
         }
     }
 

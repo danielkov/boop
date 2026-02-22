@@ -16,11 +16,17 @@ outputs:
     description: "Whether boop apply found and applied pending changes"
     value: ${{ steps.apply.outputs.released }}
   version:
-    description: "The current version from boop version"
+    description: "The current version from boop version (single-workspace)"
     value: ${{ steps.meta.outputs.version }}
   changelog:
-    description: "The changelog from boop changelog"
+    description: "The changelog from boop changelog (single-workspace)"
     value: ${{ steps.meta.outputs.changelog }}
+  version_json:
+    description: "JSON object mapping workspace names to versions (workspace mode)"
+    value: ${{ steps.meta.outputs.version_json }}
+  changelog_json:
+    description: "JSON object mapping workspace names to changelogs grouped by bump type (workspace mode)"
+    value: ${{ steps.meta.outputs.changelog_json }}
 
 runs:
   using: "composite"
@@ -53,7 +59,7 @@ runs:
       id: apply
       shell: bash
       run: |
-        if boop apply; then
+        if boop apply --all; then
           echo "released=true" >> "$GITHUB_OUTPUT"
         else
           echo "released=false" >> "$GITHUB_OUTPUT"
@@ -64,9 +70,16 @@ runs:
       id: meta
       shell: bash
       run: |
-        echo "version=$(boop version)" >> "$GITHUB_OUTPUT"
-
-        EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-        echo "changelog<<$EOF" >> "$GITHUB_OUTPUT"
-        boop changelog >> "$GITHUB_OUTPUT"
-        echo "$EOF" >> "$GITHUB_OUTPUT"
+        if PLAIN_VERSION=$(boop version 2>/dev/null); then
+          echo "version=$PLAIN_VERSION" >> "$GITHUB_OUTPUT"
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "changelog<<$EOF" >> "$GITHUB_OUTPUT"
+          boop changelog >> "$GITHUB_OUTPUT"
+          echo "$EOF" >> "$GITHUB_OUTPUT"
+        else
+          echo "version_json=$(boop version --all-json)" >> "$GITHUB_OUTPUT"
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "changelog_json<<$EOF" >> "$GITHUB_OUTPUT"
+          boop changelog --all-json >> "$GITHUB_OUTPUT"
+          echo "$EOF" >> "$GITHUB_OUTPUT"
+        fi
