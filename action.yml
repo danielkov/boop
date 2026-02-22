@@ -75,11 +75,13 @@ runs:
           EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
           echo "changelog<<$EOF" >> "$GITHUB_OUTPUT"
           boop changelog >> "$GITHUB_OUTPUT"
+          echo "" >> "$GITHUB_OUTPUT"
           echo "$EOF" >> "$GITHUB_OUTPUT"
         else
           echo "version_json=$(boop version --all-json)" >> "$GITHUB_OUTPUT"
           EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
           echo "changelog_json<<$EOF" >> "$GITHUB_OUTPUT"
           boop changelog --all-json >> "$GITHUB_OUTPUT"
+          echo "" >> "$GITHUB_OUTPUT"
           echo "$EOF" >> "$GITHUB_OUTPUT"
         fi
